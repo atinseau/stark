@@ -30,6 +30,14 @@ function info(icon: string, msg: string): void {
   process.stderr.write(`  ${icon}  ${msg}\n`);
 }
 
+/** Indent every line of a multi-line string with a fixed prefix. */
+function indentBlock(text: string, prefix = "       "): string {
+  return text
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -54,9 +62,12 @@ async function main(): Promise<void> {
     logOutput: {
       json: "./logs/agent.ndjson",
       console: true, // Colorized pino-pretty output on stderr
-      // json: "./logs/agent.ndjson", // Uncomment to write structured JSON logs
+      seq: true,     // Stream structured logs to Seq (http://localhost:8082)
     },
     logLevel: "info",
+
+    // OpenTelemetry tracing → Seq (docker compose up -d)
+    tracing: true,
 
     // Automatically approve all tool permission requests
     autoApprove: true,
@@ -101,14 +112,35 @@ async function main(): Promise<void> {
         info("  ", `📄 ${ansi.cyan}${loc.path}${line}${ansi.reset}`);
       }
     }
+
+    // Show the actual command (pre-parsed by Agent from rawInput)
+    if (e.command) {
+      process.stderr.write(`${ansi.dim}${indentBlock(`$ ${ansi.reset}${ansi.yellow}${e.command}${ansi.reset}`)}${ansi.reset}\n`);
+    }
+  });
+
+  // Tool progress — show intermediate output (pre-parsed by Agent from rawOutput)
+  agent.on(AgentEvent.TOOL_UPDATE, (e) => {
+    if (e.output) {
+      const lines = e.output.split("\n");
+      const preview = lines.length > 20
+        ? [...lines.slice(0, 20), `${ansi.dim}… (${lines.length - 20} more lines)${ansi.reset}`].join("\n")
+        : e.output;
+      process.stderr.write(`${ansi.dim}${indentBlock(preview)}${ansi.reset}\n`);
+    }
   });
 
   agent.on(AgentEvent.TOOL_COMPLETE, (e) => {
-    info("✅", `Tool done: ${ansi.dim}${e.title}${ansi.reset}`);
+    const exitLabel = e.exitCode != null ? ` ${ansi.dim}(exit ${e.exitCode})${ansi.reset}` : "";
+    info("✅", `Tool done: ${ansi.dim}${e.title}${ansi.reset}${exitLabel}`);
   });
 
   agent.on(AgentEvent.TOOL_FAILED, (e) => {
-    info("❌", `Tool failed: ${ansi.red}${e.title}${ansi.reset}`);
+    const exitLabel = e.exitCode != null ? ` ${ansi.dim}(exit ${e.exitCode})${ansi.reset}` : "";
+    info("❌", `Tool failed: ${ansi.red}${e.title}${ansi.reset}${exitLabel}`);
+    if (e.output) {
+      process.stderr.write(`${ansi.red}${indentBlock(e.output)}${ansi.reset}\n`);
+    }
   });
 
   // Execution plan — track what the agent intends to do

@@ -1,0 +1,42 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Stark — Local Dev Log Viewer (Seq by Datalust)
+#
+# Usage:
+#   docker compose up -d
+#
+# Then open http://localhost:${SEQ_UI_PORT:-8082} in your browser.
+#
+# Seq accepts structured JSON logs via its HTTP ingestion API.
+# The pino-seq transport in the logger sends logs there automatically.
+#
+# Configuration is loaded from .env (see .env.example).
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  seq:
+    image: datalust/seq:latest
+    container_name: stark-seq
+    restart: unless-stopped
+    ports:
+      # Web UI — browse your agent logs here
+      - "${SEQ_UI_PORT:-8082}:80"
+      # Ingestion API — pino-seq sends logs to this port
+      - "${SEQ_INGEST_PORT:-5341}:5341"
+    environment:
+      # Accept the Seq EULA (required)
+      ACCEPT_EULA: "Y"
+      # No authentication for local dev — skip first-run password setup
+      SEQ_FIRSTRUN_ADMINPASSWORD: "${SEQ_ADMIN_PASSWORD:-stark}"
+      SEQ_API_CANONICALURI: "${SEQ_URL:-http://localhost:5341}"
+    volumes:
+      - seq-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  seq-data:
+    driver: local

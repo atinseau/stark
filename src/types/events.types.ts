@@ -102,6 +102,8 @@ export interface ToolStartEvent extends BaseAgentEvent {
   readonly kind?: ToolKind;
   /** File locations affected by this tool call. */
   readonly locations?: ToolCallLocation[];
+  /** The shell command being executed (parsed from rawInput for "execute" tools). */
+  readonly command?: string;
   /** Raw input parameters, if available. */
   readonly rawInput?: unknown;
 }
@@ -116,6 +118,10 @@ export interface ToolUpdateEvent extends BaseAgentEvent {
   readonly status?: ToolCallStatus | null;
   /** Updated file locations. */
   readonly locations?: ToolCallLocation[] | null;
+  /** Cleaned text output from the tool (parsed from rawOutput). */
+  readonly output?: string;
+  /** Exit code of the command, if available (parsed from rawOutput). */
+  readonly exitCode?: number;
   /** Raw output produced so far. */
   readonly rawOutput?: unknown;
 }
@@ -126,6 +132,12 @@ export interface ToolCompleteEvent extends BaseAgentEvent {
   readonly toolCallId: string;
   /** Final title of the tool call. */
   readonly title: string;
+  /** The shell command that was executed (for "execute" tools). */
+  readonly command?: string;
+  /** Final cleaned text output from the tool. */
+  readonly output?: string;
+  /** Exit code of the command, if available. */
+  readonly exitCode?: number;
 }
 
 export interface ToolFailedEvent extends BaseAgentEvent {
@@ -134,6 +146,12 @@ export interface ToolFailedEvent extends BaseAgentEvent {
   readonly toolCallId: string;
   /** Final title of the tool call. */
   readonly title: string;
+  /** The shell command that was executed (for "execute" tools). */
+  readonly command?: string;
+  /** Error/output text from the tool. */
+  readonly output?: string;
+  /** Exit code of the command, if available. */
+  readonly exitCode?: number;
 }
 
 // ── Plan Events ────────────────────────────────────────────────────────────

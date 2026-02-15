@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chmod, unlink } from "node:fs/promises";
 
 import { Agent } from "../src/classes/Agent.ts";
 import { AgentStatus } from "../src/enums/agent-status.enum.ts";
@@ -240,6 +243,45 @@ describe("Agent Destroy", () => {
 
     const snap = agent.snapshot();
     expect(snap.status).toBe(AgentStatus.DESTROYED);
+  });
+
+  it("destroy() does not emit spurious agent:error from process exit race condition", async () => {
+    // Regression test: when destroy() closes stdin, the ACP process exits
+    // and the "exit" handler fires. Before the fix, _status was still not
+    // DESTROYED at that point, so a spurious AGENT_ERROR (context: "process_exit")
+    // was emitted. The fix sets DESTROYED status before closing streams.
+
+    // Create a stub executable that stays alive by reading stdin (simulates
+    // an ACP process that hasn't exited yet when destroy() is called).
+    const stubPath = join(tmpdir(), `stark-test-stub-${Date.now()}.sh`);
+    await Bun.write(stubPath, "#!/bin/sh\ncat > /dev/null\n");
+    await chmod(stubPath, 0o755);
+
+    try {
+      const agent = new Agent(testConfig({ executable: stubPath }));
+
+      // Don't await agent.ready — the stub doesn't speak ACP so it would hang.
+      // Wait briefly to ensure the process is spawned and alive.
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Collect error events that occur DURING destroy (after init errors).
+      const errors = collectEvents<AgentErrorEvent>(
+        agent,
+        AgentEvent.AGENT_ERROR,
+      );
+
+      // destroy() closes stdin → stub exits → exit handler fires.
+      // With the fix, no process_exit error should be emitted.
+      await agent.destroy();
+
+      const processExitErrors = errors.filter(
+        (e) => e.context === "process_exit",
+      );
+      expect(processExitErrors).toHaveLength(0);
+      expect(agent.status).toBe(AgentStatus.DESTROYED);
+    } finally {
+      await unlink(stubPath).catch(() => { });
+    }
   });
 });
 

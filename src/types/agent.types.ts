@@ -25,6 +25,12 @@ export interface LogOutputConfig {
   console?: boolean;
   /** Structured JSON output — either `true` (writes to stdout) or a file path. */
   json?: boolean | string;
+  /**
+   * Stream structured logs to a Seq instance via pino-seq.
+   * - `true`  → sends to the default local URL `http://localhost:5341`
+   * - string  → sends to the provided Seq server URL (e.g. `"http://seq.internal:5341"`)
+   */
+  seq?: boolean | string;
 }
 
 /** Options passed to the Agent constructor. */
@@ -52,6 +58,18 @@ export interface AgentConfig {
 
   /** Minimum pino log level. Defaults to `"info"`. */
   logLevel?: pino.Level;
+
+  /**
+   * Enable OpenTelemetry tracing to Seq (or any OTLP-compatible backend).
+   *
+   * - `true`   → traces are sent to the default endpoint derived from `SEQ_URL`
+   *               (`http://localhost:5341/ingest/otlp/v1/traces`)
+   * - `string` → traces are sent to the provided OTLP endpoint URL
+   * - `false`  → tracing is disabled (default)
+   *
+   * Requires a running Seq instance (see `docker-compose.yml`).
+   */
+  tracing?: boolean | string;
 
   /**
    * When `true`, all permission requests are automatically approved

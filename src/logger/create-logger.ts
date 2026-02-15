@@ -2,11 +2,12 @@ import pino from "pino";
 
 import type { LogOutputConfig } from "../types/agent.types.ts";
 import type { AgentIdentity } from "../types/agent.types.ts";
+import type { TraceContext } from "../tracer/agent-tracer.ts";
 
 /**
  * Creates a configured pino logger instance for an Agent.
  *
- * Supports two output modes that can be independently enabled:
+ * Supports three output modes that can be independently enabled:
  *
  *   1. **Console** (`logOutput.console`): Colorized, human-readable output
  *      via `pino-pretty`. Great for development and debugging.
@@ -15,7 +16,12 @@ import type { AgentIdentity } from "../types/agent.types.ts";
  *      log aggregation and analysis. Can write to stdout (`true`) or to
  *      a file path (string).
  *
- * Both transports can be active simultaneously. If neither is enabled,
+ *   3. **Seq** (`logOutput.seq`): Streams structured logs to a Seq instance
+ *      via `pino-seq` for real-time visualization in a web UI.
+ *      Pass `true` to target `http://localhost:5341` or a custom URL string.
+ *      Requires a running Seq server (see `docker-compose.yml`).
+ *
+ * All transports can be active simultaneously. If none is enabled,
  * a silent logger is returned (useful in tests).
  *
  * @param identity - The agent's identity, used to tag every log line.
@@ -31,17 +37,35 @@ import type { AgentIdentity } from "../types/agent.types.ts";
  *
  * logger.info({ toolCallId: "tc-1" }, "Tool call started");
  * ```
+ *
+ * @example
+ * ```ts
+ * // With Seq enabled (requires `docker compose up -d`):
+ * const logger = createLogger(
+ *   { id: "abc-123", name: "Swift Nova" },
+ *   { logOutput: { console: true, json: "./logs/agent.ndjson", seq: true }, logLevel: "debug" }
+ * );
+ * // Then open http://localhost:8082 to visualize logs in real time.
+ * ```
  */
 export function createLogger(
   identity: AgentIdentity,
   config?: {
     logOutput?: LogOutputConfig;
     logLevel?: pino.Level;
+    /**
+     * Optional trace context from the AgentTracer.
+     * When provided, every log line carries `TraceId` and `SpanId` fields
+     * so Seq can automatically correlate logs ↔ traces in its UI.
+     */
+    traceContext?: TraceContext;
   },
 ): pino.Logger {
   const level = config?.logLevel ?? "info";
   const consoleEnabled = config?.logOutput?.console ?? true;
   const jsonOutput = config?.logOutput?.json ?? false;
+
+  const seqOutput = config?.logOutput?.seq ?? false;
 
   // Collect transports to enable
   const targets: pino.TransportTargetOptions[] = [];
@@ -81,6 +105,29 @@ export function createLogger(
     }
   }
 
+  // ── Seq transport (pino-seq) ───────────────────────────────────────────
+  if (seqOutput) {
+    const serverUrl =
+      typeof seqOutput === "string"
+        ? seqOutput
+        : (process.env.SEQ_URL ?? "http://localhost:5341");
+
+    targets.push({
+      target: "pino-seq",
+      options: {
+        serverUrl,
+        // Batch logs every 2s for performance
+        batchSizeLimit: 50,
+        eventSizeLimit: 1_048_576,
+        // Gracefully handle Seq being unavailable
+        onError(e: Error) {
+          console.warn(`[pino-seq] Failed to send logs to Seq: ${e.message}`);
+        },
+      },
+      level,
+    });
+  }
+
   // ── No transports → silent logger ──────────────────────────────────────
   if (targets.length === 0) {
     return pino({ level: "silent" });
@@ -89,14 +136,23 @@ export function createLogger(
   // ── Build the multi-transport logger ───────────────────────────────────
   const transport = pino.transport({ targets });
 
+  // Build base bindings: agent identity + optional trace context.
+  // Seq recognises PascalCase `TraceId` / `SpanId` fields and uses them
+  // to link log events to their parent trace automatically.
+  const base: Record<string, string> = {
+    agentId: identity.id,
+    agentName: identity.name,
+  };
+
+  if (config?.traceContext) {
+    base.TraceId = config.traceContext.TraceId;
+    base.SpanId = config.traceContext.SpanId;
+  }
+
   return pino(
     {
       level,
-      // Attach agent identity as base bindings so every log line carries them
-      base: {
-        agentId: identity.id,
-        agentName: identity.name,
-      },
+      base,
     },
     transport,
   );

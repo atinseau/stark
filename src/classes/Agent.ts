@@ -8,7 +8,6 @@ import type {
   CreateTerminalResponse,
   KillTerminalCommandRequest,
   KillTerminalCommandResponse,
-  McpServer,
   PermissionOption,
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -40,6 +39,8 @@ import { generateIdentity } from "../utils/identity.ts";
 import { TerminalManager } from "../utils/terminal-manager.ts";
 import { isoNow, truncate } from "../utils/formatting.ts";
 import { createLogger } from "../logger/create-logger.ts";
+import { parseToolCommand, parseToolOutput, parseExitCode } from "../utils/tool-parsing.ts";
+import { AgentTracer } from "../tracer/agent-tracer.ts";
 
 // ── Internal Types ─────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ interface TrackedToolCall {
   title: string;
   kind?: string;
   status?: string;
+  command?: string;
 }
 
 // ── Agent Class ────────────────────────────────────────────────────────────
@@ -140,6 +142,9 @@ export class Agent extends EventEmitter {
   /** Tracks in-flight tool calls by ID. */
   private readonly toolCalls = new Map<string, TrackedToolCall>();
 
+  /** OpenTelemetry tracer for distributed tracing to Seq. */
+  private readonly tracer: AgentTracer;
+
   /**
    * Queue of context instructions injected via `injectContext()`.
    * These are automatically sent as follow-up prompts after the current
@@ -182,10 +187,24 @@ export class Agent extends EventEmitter {
       name: this.config.name,
     });
 
-    // Create logger with agent identity bindings
+    // Create tracer (no-op when tracing is disabled) — must be created
+    // BEFORE the logger so we can inject trace context into log bindings.
+    const tracingConfig = this.config.tracing;
+    this.tracer = new AgentTracer(this.identity, {
+      enabled: !!tracingConfig,
+      ...(typeof tracingConfig === "string" ? { endpoint: tracingConfig } : {}),
+    });
+
+    // Start the root session span immediately so traceId is available
+    this.tracer.startSession();
+
+    // Create logger with agent identity + trace context bindings.
+    // When tracing is enabled, every log line carries TraceId/SpanId so
+    // Seq can automatically correlate logs ↔ traces in its UI.
     this.logger = createLogger(this.identity, {
       logOutput: this.config.logOutput,
       logLevel: this.config.logLevel,
+      traceContext: this.tracer.getTraceContext(),
     });
 
     // Wire terminal manager callbacks to our event system
@@ -267,6 +286,9 @@ export class Agent extends EventEmitter {
 
     this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
 
+    // ── Tracing: start prompt span ───────────────────────────────────
+    const promptSpan = this.tracer.startPrompt(promptIndex, fullPrompt);
+
     try {
       const result = await this.connection!.prompt({
         sessionId: this._sessionId!,
@@ -294,6 +316,9 @@ export class Agent extends EventEmitter {
         "Prompt completed",
       );
 
+      // ── Tracing: end prompt span (success) ─────────────────────────
+      this.tracer.endPrompt(promptSpan, result.stopReason);
+
       this.setStatus(AgentStatus.IDLE);
       this.emitTyped(AgentEvent.AGENT_IDLE, { previousStatus: AgentStatus.BUSY });
 
@@ -302,8 +327,12 @@ export class Agent extends EventEmitter {
 
       return promptResult;
     } catch (err) {
-      this.setStatus(AgentStatus.ERROR);
       const error = err instanceof Error ? err : new Error(String(err));
+
+      // ── Tracing: end prompt span (error) ───────────────────────────
+      this.tracer.endPrompt(promptSpan, undefined, error);
+
+      this.setStatus(AgentStatus.ERROR);
       this.emitTyped(AgentEvent.AGENT_ERROR, {
         error,
         context: `prompt #${promptIndex}`,
@@ -360,6 +389,9 @@ export class Agent extends EventEmitter {
       queued,
     });
 
+    // ── Tracing: record context injection event ──────────────────────
+    this.tracer.recordContextInjection(instructions, queued);
+
     if (queued) {
       // Agent is busy — queue for later
       this.pendingContext.push(instructions);
@@ -411,6 +443,14 @@ export class Agent extends EventEmitter {
 
     this.logger.info("Destroying agent…");
 
+    // ── Tracing: flush all spans before tearing down ─────────────────
+    await this.tracer.shutdown();
+
+    // Mark as destroyed early so the process "exit" handler
+    // knows this is an intentional shutdown and doesn't emit
+    // a spurious AGENT_ERROR.
+    this.setStatus(AgentStatus.DESTROYED);
+
     // Kill all tracked terminals
     this.terminalManager.destroyAll();
 
@@ -452,7 +492,6 @@ export class Agent extends EventEmitter {
       this.process = null;
     }
 
-    this.setStatus(AgentStatus.DESTROYED);
     this.emitTyped(AgentEvent.AGENT_DESTROYED, {});
 
     this.logger.info("Agent destroyed");
@@ -509,21 +548,29 @@ export class Agent extends EventEmitter {
    * Called once from the constructor; consumers await `agent.ready`.
    */
   private async initialize(): Promise<void> {
+    // ── Tracing: start initialize span ───────────────────────────────
+    const initSpan = this.tracer.startInitialize();
+
     this.logger.debug(
       { executable: this.config.executable },
       "Spawning ACP process",
     );
 
     // Spawn the agent process — wrap in try-catch for ENOENT and similar errors
+    const spawnPhase = this.tracer.startInitPhase("spawn-process", initSpan);
     let proc: ChildProcess;
     try {
       proc = spawn(this.config.executable, ["--acp", "--stdio"], {
         stdio: ["pipe", "pipe", "inherit"],
       });
+      this.tracer.endInitialize(spawnPhase);
     } catch (err) {
-      throw new Error(
+      const error = new Error(
         `Failed to spawn ACP process "${this.config.executable}": ${err instanceof Error ? err.message : String(err)}`,
       );
+      this.tracer.endInitialize(spawnPhase, error);
+      this.tracer.endInitialize(initSpan, error);
+      throw error;
     }
 
     // Listen for spawn errors (e.g. ENOENT when executable doesn't exist).
@@ -579,19 +626,30 @@ export class Agent extends EventEmitter {
     // instead of hanging on the initialize() call.
     this.logger.debug("Sending ACP initialize request");
 
-    const initResult = await Promise.race([
-      this.connection.initialize({
-        protocolVersion: acp.PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: {
-            readTextFile: true,
-            writeTextFile: true,
+    const acpInitPhase = this.tracer.startInitPhase("acp-protocol-init", initSpan);
+
+    let initResult;
+    try {
+      initResult = await Promise.race([
+        this.connection.initialize({
+          protocolVersion: acp.PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: {
+              readTextFile: true,
+              writeTextFile: true,
+            },
+            terminal: true,
           },
-          terminal: true,
-        },
-      }),
-      spawnError,
-    ]);
+        }),
+        spawnError,
+      ]);
+      this.tracer.endInitialize(acpInitPhase);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.tracer.endInitialize(acpInitPhase, error);
+      this.tracer.endInitialize(initSpan, error);
+      throw error;
+    }
 
     this.logger.info(
       {
@@ -604,10 +662,21 @@ export class Agent extends EventEmitter {
     // Create a new session
     this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
 
-    const sessionResult = await this.connection.newSession({
-      cwd: this.config.cwd,
-      mcpServers: this.config.mcpServers ?? [],
-    });
+    const sessionPhase = this.tracer.startInitPhase("create-session", initSpan);
+
+    let sessionResult;
+    try {
+      sessionResult = await this.connection.newSession({
+        cwd: this.config.cwd,
+        mcpServers: this.config.mcpServers ?? [],
+      });
+      this.tracer.endInitialize(sessionPhase);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.tracer.endInitialize(sessionPhase, error);
+      this.tracer.endInitialize(initSpan, error);
+      throw error;
+    }
 
     this._sessionId = sessionResult.sessionId;
 
@@ -615,6 +684,9 @@ export class Agent extends EventEmitter {
       { sessionId: this._sessionId },
       "Session created",
     );
+
+    // ── Tracing: end initialize span (success) ──────────────────────
+    this.tracer.endInitialize(initSpan);
 
     // Ready!
     this.setStatus(AgentStatus.IDLE);
@@ -636,6 +708,12 @@ export class Agent extends EventEmitter {
         params: RequestPermissionRequest,
       ): Promise<RequestPermissionResponse> => {
         const toolCallTitle = params.toolCall.title ?? params.toolCall.toolCallId;
+
+        // ── Tracing: start permission span ───────────────────────────
+        const permSpan = this.tracer.startPermission({
+          toolCallId: params.toolCall.toolCallId,
+          toolCallTitle,
+        });
 
         this.logger.info(
           {
@@ -677,6 +755,12 @@ export class Agent extends EventEmitter {
               optionName: allowOption.name,
             });
 
+            // ── Tracing: end permission span (granted) ───────────────
+            this.tracer.endPermission(permSpan, "granted", {
+              optionId: allowOption.optionId,
+              optionName: allowOption.name,
+            });
+
             return {
               outcome: {
                 outcome: "selected" as const,
@@ -687,6 +771,10 @@ export class Agent extends EventEmitter {
         }
 
         // No auto-approve or no allow option available
+        const denialReason = this.config.autoApprove
+          ? "No allow option available"
+          : "Auto-approve disabled";
+
         this.logger.warn(
           { toolCallId: params.toolCall.toolCallId },
           "Permission denied (no allow option or auto-approve disabled)",
@@ -694,10 +782,11 @@ export class Agent extends EventEmitter {
 
         this.emitTyped(AgentEvent.PERMISSION_DENIED, {
           toolCallId: params.toolCall.toolCallId,
-          reason: this.config.autoApprove
-            ? "No allow option available"
-            : "Auto-approve disabled",
+          reason: denialReason,
         });
+
+        // ── Tracing: end permission span (denied) ────────────────────
+        this.tracer.endPermission(permSpan, "denied", { reason: denialReason });
 
         return { outcome: { outcome: "cancelled" as const } };
       },
@@ -713,6 +802,13 @@ export class Agent extends EventEmitter {
       writeTextFile: async (
         params: WriteTextFileRequest,
       ): Promise<WriteTextFileResponse> => {
+        // ── Tracing: start fs.write span ─────────────────────────────
+        const fsSpan = this.tracer.startFs({
+          path: params.path,
+          operation: "write",
+          contentLength: params.content.length,
+        });
+
         this.logger.info(
           { path: params.path, contentLength: params.content.length },
           `FS write: ${params.path}`,
@@ -723,36 +819,54 @@ export class Agent extends EventEmitter {
           contentLength: params.content.length,
         });
 
-        const { writeFile, mkdir } = await import("node:fs/promises");
-        const { dirname } = await import("node:path");
+        try {
+          const { writeFile, mkdir } = await import("node:fs/promises");
+          const { dirname } = await import("node:path");
 
-        await mkdir(dirname(params.path), { recursive: true });
-        await writeFile(params.path, params.content, "utf-8");
+          await mkdir(dirname(params.path), { recursive: true });
+          await writeFile(params.path, params.content, "utf-8");
 
-        this.logger.debug({ path: params.path }, "FS write complete");
-        return {};
+          this.logger.debug({ path: params.path }, "FS write complete");
+          this.tracer.endFs(fsSpan, params.content.length);
+          return {};
+        } catch (err) {
+          this.tracer.endFs(fsSpan, undefined, err instanceof Error ? err : new Error(String(err)));
+          throw err;
+        }
       },
 
       // ── File System: Read ────────────────────────────────────────────
       readTextFile: async (
         params: ReadTextFileRequest,
       ): Promise<ReadTextFileResponse> => {
-        this.logger.info({ path: params.path }, `FS read: ${params.path}`);
-
-        const { readFile } = await import("node:fs/promises");
-        const content = await readFile(params.path, "utf-8");
-
-        this.logger.debug(
-          { path: params.path, contentLength: content.length },
-          "FS read complete",
-        );
-
-        this.emitTyped(AgentEvent.FS_READ, {
+        // ── Tracing: start fs.read span ──────────────────────────────
+        const fsSpan = this.tracer.startFs({
           path: params.path,
-          contentLength: content.length,
+          operation: "read",
         });
 
-        return { content };
+        this.logger.info({ path: params.path }, `FS read: ${params.path}`);
+
+        try {
+          const { readFile } = await import("node:fs/promises");
+          const content = await readFile(params.path, "utf-8");
+
+          this.logger.debug(
+            { path: params.path, contentLength: content.length },
+            "FS read complete",
+          );
+
+          this.emitTyped(AgentEvent.FS_READ, {
+            path: params.path,
+            contentLength: content.length,
+          });
+
+          this.tracer.endFs(fsSpan, content.length);
+          return { content };
+        } catch (err) {
+          this.tracer.endFs(fsSpan, undefined, err instanceof Error ? err : new Error(String(err)));
+          throw err;
+        }
       },
 
       // ── Terminal: Create ─────────────────────────────────────────────
@@ -760,6 +874,14 @@ export class Agent extends EventEmitter {
         params: CreateTerminalRequest,
       ): Promise<CreateTerminalResponse> => {
         const terminal = this.terminalManager.create(params);
+
+        // ── Tracing: start terminal span ─────────────────────────────
+        this.tracer.startTerminal({
+          terminalId: terminal.terminalId,
+          command: terminal.command,
+          args: terminal.args,
+          cwd: terminal.cwd,
+        });
 
         this.logger.info(
           {
@@ -878,10 +1000,21 @@ export class Agent extends EventEmitter {
 
       // ── New tool call ────────────────────────────────────────────────
       case "tool_call": {
+        const command = parseToolCommand(update.rawInput);
+
         this.toolCalls.set(update.toolCallId, {
           title: update.title,
           kind: update.kind ?? undefined,
           status: update.status ?? undefined,
+          command,
+        });
+
+        // ── Tracing: start tool call span ────────────────────────────
+        this.tracer.startToolCall({
+          toolCallId: update.toolCallId,
+          title: update.title,
+          kind: update.kind ?? undefined,
+          command,
         });
 
         this.logger.info(
@@ -890,8 +1023,9 @@ export class Agent extends EventEmitter {
             kind: update.kind,
             status: update.status,
             locations: update.locations,
+            command,
           },
-          `Tool: ${update.title}`,
+          `Tool: ${update.title}${command ? ` → $ ${command}` : ""}`,
         );
 
         this.emitTyped(AgentEvent.TOOL_START, {
@@ -899,6 +1033,7 @@ export class Agent extends EventEmitter {
           title: update.title,
           kind: update.kind ?? undefined,
           locations: update.locations ?? undefined,
+          command,
           rawInput: update.rawInput,
         });
         break;
@@ -916,13 +1051,30 @@ export class Agent extends EventEmitter {
           if (update.kind) existing.kind = update.kind;
         }
 
+        const output = parseToolOutput(update.rawOutput);
+        const exitCode = parseExitCode(update.rawOutput);
+
+        // ── Tracing: update or end tool call span ────────────────────
+        if (update.status === "completed" || update.status === "failed") {
+          this.tracer.endToolCall(update.toolCallId, update.status ?? undefined, exitCode);
+        } else {
+          this.tracer.updateToolCall(
+            update.toolCallId,
+            update.status ?? undefined,
+            output,
+            exitCode,
+          );
+        }
+
         this.logger.info(
           {
             toolCallId: update.toolCallId,
             status: update.status,
             locations: update.locations,
+            exitCode,
+            output: output ? truncate(output, 500) : undefined,
           },
-          `Tool update: ${title} → ${update.status ?? "update"}`,
+          `Tool update: ${title} → ${update.status ?? "update"}${exitCode != null ? ` (exit ${exitCode})` : ""}`,
         );
 
         this.emitTyped(AgentEvent.TOOL_UPDATE, {
@@ -930,6 +1082,8 @@ export class Agent extends EventEmitter {
           title: update.title,
           status: update.status,
           locations: update.locations,
+          output,
+          exitCode,
           rawOutput: update.rawOutput,
         });
 
@@ -938,11 +1092,17 @@ export class Agent extends EventEmitter {
           this.emitTyped(AgentEvent.TOOL_COMPLETE, {
             toolCallId: update.toolCallId,
             title,
+            command: existing?.command,
+            output,
+            exitCode,
           });
         } else if (update.status === "failed") {
           this.emitTyped(AgentEvent.TOOL_FAILED, {
             toolCallId: update.toolCallId,
             title,
+            command: existing?.command,
+            output,
+            exitCode,
           });
         }
         break;
@@ -1011,6 +1171,9 @@ export class Agent extends EventEmitter {
       case "usage_update": {
         const percent =
           update.size > 0 ? Math.round((update.used / update.size) * 100) : 0;
+
+        // ── Tracing: record usage event ──────────────────────────────
+        this.tracer.recordUsage(update.used, update.size, percent);
 
         this.logger.info(
           {
