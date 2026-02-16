@@ -71,7 +71,7 @@ export async function main(): Promise<void> {
     // Log output config — applies to the pool AND all spawned agents
     logOutput: {
       console: true,
-      json: true,
+      json: "./logs/agent-pool.ndjson",
       seq: true,
     },
     logLevel: "info",
