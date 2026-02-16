@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 
 import * as acp from "@agentclientprotocol/sdk";
+import { SpanStatusCode } from "@opentelemetry/api";
 import type pino from "pino";
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../enums/agent-status.enum.ts";
@@ -21,8 +22,6 @@ import { Tracer } from "../tracer/tracer.ts";
 import { AgentAcpClientFactory } from "./agent-acp-client-factory.ts";
 import { AgentContextManager } from "./agent-context-manager.ts";
 import { AgentSessionUpdateHandler } from "./agent-session-update-handler.ts";
-import { recordContextInjection } from "./tracer-helpers/context.ts";
-import { endTerminalById } from "./tracer-helpers/terminal.ts";
 
 // ── Agent Class ────────────────────────────────────────────────────────────
 
@@ -219,15 +218,19 @@ export class Agent extends EventEmitter {
 		});
 
 		this.terminalManager.setExitCallback((terminalId, result) => {
+			// Enter the terminal span so that the "Terminal exited" log
+			// carries the terminal's own SpanId (not the prompt's).
+			const termSpan = this.tracer.getTrackedSpan(terminalId);
+			if (termSpan) this.tracer.enterSpan(termSpan);
+
 			this.logger.info(
 				{ terminalId, exitCode: result.exitCode, signal: result.signal },
 				"Terminal exited",
 			);
 
 			// End the terminal span that was started in the ACP client factory.
-			// The span is tracked internally by terminalId so we don't need
-			// the original span reference.
-			endTerminalById(this.tracer, terminalId, result.exitCode, result.signal);
+			// traceTerminalEnd calls leaveSpan + end internally.
+			this.traceTerminalEnd(terminalId, result.exitCode, result.signal);
 
 			this.emitTyped(AgentEvent.TERMINAL_EXIT, {
 				terminalId,
@@ -291,14 +294,14 @@ export class Agent extends EventEmitter {
 			promptIndex,
 		});
 
-		this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
-
 		// ── Tracing: start prompt span ───────────────────────────────────
 		const promptSpan = this.tracer.startActiveSpan("agent.prompt", {
 			"prompt.index": promptIndex,
 			"prompt.text": fullPrompt.slice(0, 500),
 			"prompt.text_length": fullPrompt.length,
 		});
+
+		this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
 
 		if (!this.connection || !this._sessionId) {
 			throw new Error("Agent is not connected or has no session");
@@ -410,7 +413,7 @@ export class Agent extends EventEmitter {
 		});
 
 		// ── Tracing: record context injection event ──────────────────────
-		recordContextInjection(this.tracer, instructions, queued);
+		this.traceContextInjection(instructions, queued);
 
 		// Push onto the pure-logic context queue
 		this.contextManager.inject(instructions);
@@ -459,9 +462,6 @@ export class Agent extends EventEmitter {
 		if (this._status === AgentStatus.DESTROYED) return;
 
 		this.logger.info("Destroying agent…");
-
-		// ── Tracing: flush all spans before tearing down ─────────────────
-		await this.tracer.shutdown();
 
 		// Mark as destroyed early so the process "exit" handler
 		// knows this is an intentional shutdown and doesn't emit
@@ -512,6 +512,11 @@ export class Agent extends EventEmitter {
 		this.emitTyped(AgentEvent.AGENT_DESTROYED, {});
 
 		this.logger.info("Agent destroyed");
+
+		// ── Tracing: flush all spans and shut down after the last log ────
+		// Placed at the very end so that all logs above retain their
+		// TraceId/SpanId via the pino mixin (shutdown nulls rootSpan).
+		await this.tracer.shutdown();
 	}
 
 	// ── Typed Event Emitter Overrides ──────────────────────────────────────
@@ -567,6 +572,7 @@ export class Agent extends EventEmitter {
 	private async initialize(): Promise<void> {
 		// ── Tracing: start initialize span ───────────────────────────────
 		const initSpan = this.tracer.startOperation("agent.initialize", {}, "root");
+		this.tracer.enterSpan(initSpan);
 
 		this.logger.debug(
 			{ executable: this.config.executable },
@@ -590,6 +596,7 @@ export class Agent extends EventEmitter {
 				`Failed to spawn ACP process "${this.config.executable}": ${err instanceof Error ? err.message : String(err)}`,
 			);
 			this.tracer.endOperation(spawnPhase, error);
+			this.tracer.leaveSpan(initSpan);
 			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
@@ -671,6 +678,7 @@ export class Agent extends EventEmitter {
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
 			this.tracer.endOperation(acpInitPhase, error);
+			this.tracer.leaveSpan(initSpan);
 			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
@@ -704,6 +712,7 @@ export class Agent extends EventEmitter {
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
 			this.tracer.endOperation(sessionPhase, error);
+			this.tracer.leaveSpan(initSpan);
 			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
@@ -713,6 +722,7 @@ export class Agent extends EventEmitter {
 		this.logger.info({ sessionId: this._sessionId }, "Session created");
 
 		// ── Tracing: end initialize span (success) ──────────────────────
+		this.tracer.leaveSpan(initSpan);
 		this.tracer.endOperation(initSpan);
 
 		// Ready!
@@ -740,6 +750,61 @@ export class Agent extends EventEmitter {
 
 		// Send as a follow-up prompt (recursive call to `prompt`)
 		await this.prompt(merged);
+	}
+
+	// ── Private: Tracing Helpers ─────────────────────────────────────────
+
+	/**
+	 * Ends a terminal span by its terminal ID.
+	 *
+	 * Removes the tracked span, sets exit code / signal attributes,
+	 * and closes the span with OK or ERROR status.
+	 * No-op if the terminal ID is unknown or was already ended.
+	 */
+	private traceTerminalEnd(
+		terminalId: string,
+		exitCode?: number | null,
+		signal?: string | null,
+	): void {
+		const span = this.tracer.removeTrackedSpan(terminalId);
+		if (!span || !span.isRecording()) return;
+
+		if (exitCode !== undefined && exitCode !== null) {
+			span.setAttribute("terminal.exit_code", exitCode);
+		}
+		if (signal) {
+			span.setAttribute("terminal.signal", signal);
+		}
+
+		const failed =
+			exitCode !== undefined && exitCode !== null && exitCode !== 0;
+
+		span.setStatus(
+			failed
+				? {
+						code: SpanStatusCode.ERROR,
+						message: `Terminal exited with code ${exitCode}`,
+					}
+				: { code: SpanStatusCode.OK },
+		);
+
+		this.tracer.leaveSpan(span);
+		span.end();
+	}
+
+	/**
+	 * Records a context injection as an event on the active span.
+	 *
+	 * The instructions text is truncated to 500 characters in the span event
+	 * attributes to avoid excessively large traces. The `queued` flag is
+	 * recorded as a native boolean.
+	 */
+	private traceContextInjection(instructions: string, queued: boolean): void {
+		this.tracer.recordEvent("active", "context.injected", {
+			"context.instructions": instructions.slice(0, 500),
+			"context.instructions_length": instructions.length,
+			"context.queued": queued,
+		});
 	}
 
 	// ── Private: Helpers ───────────────────────────────────────────────────

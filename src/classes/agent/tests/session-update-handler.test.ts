@@ -65,6 +65,8 @@ function noopTracer(): Tracer {
 			return entry?.span;
 		}),
 		recordEvent: mock(() => {}),
+		enterSpan: mock(() => {}),
+		leaveSpan: mock(() => {}),
 		flush: mock(async () => {}),
 		shutdown: mock(async () => {}),
 	} as unknown as Tracer;
@@ -702,7 +704,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		} as any);
 
 		expect(tracer.recordEvent).toHaveBeenCalledTimes(1);
-		expect(tracer.recordEvent).toHaveBeenCalledWith("auto", "usage.update", {
+		expect(tracer.recordEvent).toHaveBeenCalledWith("active", "usage.update", {
 			"usage.context_used": 7500,
 			"usage.context_size": 10000,
 			"usage.context_percent": 75,

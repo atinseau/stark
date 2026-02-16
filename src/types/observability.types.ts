@@ -18,6 +18,17 @@ export interface TraceContext {
 	TraceId: string;
 	/** The current span ID (16 hex chars). */
 	SpanId: string;
+	/**
+	 * The parent span ID (16 hex chars), if the current span has a parent.
+	 *
+	 * Present when the current span is a child of another span (e.g., a
+	 * prompt span parented under the root session span, or a tool call
+	 * span parented under the prompt span). Absent for root spans.
+	 *
+	 * Seq and other backends use this field to reconstruct the span
+	 * hierarchy directly from log events, even without OTLP trace data.
+	 */
+	ParentSpanId?: string;
 }
 
 /**

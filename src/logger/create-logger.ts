@@ -1,9 +1,8 @@
 import pino from "pino";
+import pretty from "pino-pretty";
+import { createStream as createSeqStream } from "pino-seq";
 import type { AgentIdentity, LogOutputConfig } from "../types/agent.types.ts";
-import type {
-	LogTraceProvider,
-	TraceContext,
-} from "../types/observability.types.ts";
+import type { LogTraceProvider } from "../types/observability.types.ts";
 
 // ── Internal Helpers ───────────────────────────────────────────────────────
 
@@ -85,6 +84,10 @@ function resolveSeq(
 /**
  * Creates a configured pino logger instance for an Agent.
  *
+ * Uses `pino.multistream()` instead of `pino.transport()` so that all
+ * streams run in the main thread — avoiding the `thread-stream` /
+ * `worker_threads` mechanism that is not fully supported by Bun.
+ *
  * Supports three output modes that can be independently enabled:
  *
  *   1. **Console** (`logOutput.console`): Colorized, human-readable output
@@ -125,10 +128,6 @@ function resolveSeq(
  * `mixin` option). This allows Seq to correlate logs with the correct span,
  * even as the active span changes across prompts and tool calls.
  *
- * The older `traceContext` option injects a **static** TraceId/SpanId that
- * never changes. Prefer `traceContextProvider` for accurate span-level
- * correlation. When both are provided, the dynamic provider takes precedence.
- *
  * @param identity - The agent's identity, used to tag every log line.
  * @param config   - Which outputs to enable and at what log level.
  * @returns A configured `pino.Logger` instance.
@@ -145,7 +144,7 @@ function resolveSeq(
  *
  * @example
  * ```ts
- * // With dynamic trace context (recommended):
+ * // With dynamic trace context:
  * const logger = createLogger(
  *   { id: "abc-123", name: "Swift Nova" },
  *   {
@@ -163,21 +162,13 @@ export function createLogger(
 		logOutput?: LogOutputConfig;
 		logLevel?: pino.Level;
 		/**
-		 * @deprecated Use `traceContextProvider` for dynamic span-level correlation.
-		 *
-		 * Static trace context injected into every log line's base bindings.
-		 * The TraceId/SpanId will be fixed to whatever span was active at
-		 * logger creation time — they won't follow prompt or tool call spans.
-		 */
-		traceContext?: TraceContext;
-		/**
 		 * Dynamic trace context provider.
 		 *
 		 * Called on every log write via pino's `mixin` option. Returns the
 		 * `TraceId` and `SpanId` of the currently active span so that Seq
 		 * can correlate each log line with the correct span.
 		 *
-		 * Takes precedence over the static `traceContext` option.
+		 * Ensures logs are correlated with the correct span at all times.
 		 */
 		traceContextProvider?: LogTraceProvider;
 	},
@@ -189,68 +180,65 @@ export function createLogger(
 	const jsonCfg = resolveJson(config?.logOutput?.json, globalLevel);
 	const seqCfg = resolveSeq(config?.logOutput?.seq, globalLevel);
 
-	// Collect transports to enable
-	const targets: pino.TransportTargetOptions[] = [];
+	// Collect streams for pino.multistream()
+	const streams: pino.StreamEntry[] = [];
 
-	// ── Console transport (pino-pretty) ────────────────────────────────
+	// ── Console stream (pino-pretty) ───────────────────────────────────
 	if (consoleCfg.enabled) {
-		targets.push({
-			target: "pino-pretty",
-			options: {
-				colorize: true,
-				translateTime: "HH:MM:ss.l",
-				ignore: "pid,hostname",
-				messageFormat: "{agentName} | {msg}",
-				customPrettifiers: {},
-			},
+		const prettyStream = pretty({
+			colorize: true,
+			translateTime: "HH:MM:ss.l",
+			ignore: "pid,hostname",
+			messageFormat: "{agentName} | {msg}",
+		});
+
+		streams.push({
 			level: consoleCfg.level,
+			stream: prettyStream,
 		});
 	}
 
-	// ── JSON transport ─────────────────────────────────────────────────
+	// ── JSON stream ────────────────────────────────────────────────────
 	if (jsonCfg.enabled && jsonCfg.destination !== false) {
-		if (typeof jsonCfg.destination === "string") {
-			// Write JSON to a file
-			targets.push({
-				target: "pino/file",
-				options: { destination: jsonCfg.destination, mkdir: true },
-				level: jsonCfg.level,
-			});
-		} else {
-			// Write JSON to stdout (fd 1)
-			targets.push({
-				target: "pino/file",
-				options: { destination: jsonCfg.destination },
-				level: jsonCfg.level,
-			});
-		}
-	}
+		const dest =
+			typeof jsonCfg.destination === "string"
+				? pino.destination({
+						dest: jsonCfg.destination,
+						mkdir: true,
+						sync: false,
+					})
+				: pino.destination({ dest: jsonCfg.destination, sync: false });
 
-	// ── Seq transport (pino-seq) ───────────────────────────────────────
-	if (seqCfg.enabled) {
-		targets.push({
-			target: "pino-seq",
-			options: {
-				serverUrl: seqCfg.serverUrl,
-				// Batch logs every 2s for performance
-				batchSizeLimit: 50,
-				eventSizeLimit: 1_048_576,
-				// Gracefully handle Seq being unavailable
-				onError(e: Error) {
-					console.warn(`[pino-seq] Failed to send logs to Seq: ${e.message}`);
-				},
-			},
-			level: seqCfg.level,
+		streams.push({
+			level: jsonCfg.level,
+			stream: dest,
 		});
 	}
 
-	// ── No transports → silent logger ──────────────────────────────────
-	if (targets.length === 0) {
+	// ── Seq stream (pino-seq) ──────────────────────────────────────────
+	if (seqCfg.enabled) {
+		const seqStream = createSeqStream({
+			serverUrl: seqCfg.serverUrl,
+			batchSizeLimit: 50,
+			eventSizeLimit: 1_048_576,
+			onError(e: Error) {
+				console.warn(`[pino-seq] Failed to send logs to Seq: ${e.message}`);
+			},
+		});
+
+		streams.push({
+			level: seqCfg.level,
+			stream: seqStream,
+		});
+	}
+
+	// ── No streams → silent logger ─────────────────────────────────────
+	if (streams.length === 0) {
 		return pino({ level: "silent" });
 	}
 
-	// ── Build the multi-transport logger ───────────────────────────────
-	const transport = pino.transport({ targets });
+	// ── Build the multi-stream logger ──────────────────────────────────
+	const multistream = pino.multistream(streams);
 
 	// ── Base bindings: agent identity ──────────────────────────────────
 	// Static fields that never change across the logger's lifetime.
@@ -258,13 +246,6 @@ export function createLogger(
 		agentId: identity.id,
 		agentName: identity.name,
 	};
-
-	// If only the static traceContext is provided (no dynamic provider),
-	// bake TraceId/SpanId into the base bindings for backward compat.
-	if (config?.traceContext && !config?.traceContextProvider) {
-		base.TraceId = config.traceContext.TraceId;
-		base.SpanId = config.traceContext.SpanId;
-	}
 
 	// ── Dynamic trace context via mixin ────────────────────────────────
 	// When a traceContextProvider is supplied, pino calls our mixin on
@@ -275,7 +256,11 @@ export function createLogger(
 		? (): Record<string, string> => {
 				const ctx = traceProvider();
 				if (ctx) {
-					return { TraceId: ctx.TraceId, SpanId: ctx.SpanId };
+					return {
+						TraceId: ctx.TraceId,
+						SpanId: ctx.SpanId,
+						...(ctx.ParentSpanId && { ParentSpanId: ctx.ParentSpanId }),
+					};
 				}
 				return {};
 			}
@@ -297,7 +282,7 @@ export function createLogger(
 			base,
 			...(mixin && { mixin }),
 		},
-		transport,
+		multistream,
 	);
 }
 

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import {
+	AlwaysOffSampler,
+	AlwaysOnSampler,
+	BasicTracerProvider,
+	ParentBasedSampler,
+} from "@opentelemetry/sdk-trace-base";
 import { createTracerProvider } from "../create-tracer-provider.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -218,5 +223,57 @@ describe("createTracerProvider", () => {
 		const attrs = resource.attributes;
 		expect(attrs["service.name"]).toBe("stark");
 		expect(attrs["service.version"]).toBe("0.1.0");
+	});
+
+	// ── Sampling ─────────────────────────────────────────────────────────
+
+	it("accepts a custom sampling ratio", () => {
+		const provider = createTracerProvider({ samplingRatio: 0.5 });
+		providers.push(provider);
+
+		expect(provider).toBeInstanceOf(BasicTracerProvider);
+
+		// The sampler should be a ParentBasedSampler wrapping a ratio sampler
+		const sampler =
+			(provider as any)._config?.sampler ?? (provider as any)._sampler;
+		expect(sampler).toBeInstanceOf(ParentBasedSampler);
+	});
+
+	it("uses AlwaysOnSampler when ratio is 1.0", () => {
+		const provider = createTracerProvider({ samplingRatio: 1.0 });
+		providers.push(provider);
+
+		const sampler =
+			(provider as any)._config?.sampler ?? (provider as any)._sampler;
+		expect(sampler).toBeInstanceOf(AlwaysOnSampler);
+	});
+
+	it("uses AlwaysOffSampler when ratio is 0.0", () => {
+		const provider = createTracerProvider({ samplingRatio: 0.0 });
+		providers.push(provider);
+
+		const sampler =
+			(provider as any)._config?.sampler ?? (provider as any)._sampler;
+		expect(sampler).toBeInstanceOf(AlwaysOffSampler);
+	});
+
+	// ── Batch Processor Configuration ────────────────────────────────────
+
+	it("accepts custom batch processor configuration", () => {
+		const provider = createTracerProvider({
+			batchConfig: {
+				maxQueueSize: 1024,
+				maxExportBatchSize: 128,
+				scheduledDelayMillis: 5000,
+			},
+		});
+		providers.push(provider);
+
+		expect(provider).toBeInstanceOf(BasicTracerProvider);
+
+		// Verify the provider works with custom batch config
+		const tracer = provider.getTracer("test");
+		const span = tracer.startSpan("batch-config-test");
+		span.end();
 	});
 });

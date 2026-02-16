@@ -1,14 +1,19 @@
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
+	AlwaysOffSampler,
+	AlwaysOnSampler,
 	BasicTracerProvider,
 	BatchSpanProcessor,
+	ParentBasedSampler,
 	SimpleSpanProcessor,
+	TraceIdRatioBasedSampler,
 } from "@opentelemetry/sdk-trace-base";
 import {
 	ATTR_SERVICE_NAME,
 	ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
+import { DEFAULT_SERVICE_NAME, DEFAULT_SERVICE_VERSION } from "./constants.ts";
 
 /**
  * Configuration options for the OpenTelemetry tracer provider.
@@ -47,6 +52,30 @@ export interface TracerProviderConfig {
 	 * @default false
 	 */
 	immediateExport?: boolean;
+
+	/**
+	 * Sampling ratio (0.0 to 1.0) for trace sampling.
+	 * - `1.0` (default) — sample all traces
+	 * - `0.5` — sample ~50% of traces
+	 * - `0.0` — sample no traces
+	 *
+	 * Uses `ParentBasedSampler` wrapping `TraceIdRatioBasedSampler`
+	 * so that child spans inherit the parent's sampling decision.
+	 */
+	samplingRatio?: number;
+
+	/**
+	 * Configuration for the batch span processor.
+	 * Only used when `immediateExport` is `false` (the default).
+	 */
+	batchConfig?: {
+		/** Maximum number of spans in the export queue. @default 512 */
+		maxQueueSize?: number;
+		/** Maximum batch size per export. @default 64 */
+		maxExportBatchSize?: number;
+		/** Delay between scheduled exports in milliseconds. @default 2000 */
+		scheduledDelayMillis?: number;
+	};
 }
 
 /**
@@ -90,8 +119,19 @@ export function createTracerProvider(
 	config?: TracerProviderConfig,
 ): BasicTracerProvider {
 	const endpoint = resolveEndpoint(config?.endpoint);
-	const serviceName = config?.serviceName ?? "stark";
-	const serviceVersion = config?.serviceVersion ?? "0.1.0";
+	const serviceName = config?.serviceName ?? DEFAULT_SERVICE_NAME;
+	const serviceVersion = config?.serviceVersion ?? DEFAULT_SERVICE_VERSION;
+
+	// ── Sampler ─────────────────────────────────────────────────────────
+	const ratio = config?.samplingRatio ?? 1.0;
+	const sampler =
+		ratio >= 1.0
+			? new AlwaysOnSampler()
+			: ratio <= 0.0
+				? new AlwaysOffSampler()
+				: new ParentBasedSampler({
+						root: new TraceIdRatioBasedSampler(ratio),
+					});
 
 	// ── OTLP Exporter ───────────────────────────────────────────────────
 	const headers: Record<string, string> = {};
@@ -113,13 +153,15 @@ export function createTracerProvider(
 	// ── Provider ────────────────────────────────────────────────────────
 	const provider = new BasicTracerProvider({
 		resource,
+		sampler,
 		spanProcessors: [
 			config?.immediateExport
 				? new SimpleSpanProcessor(exporter)
 				: new BatchSpanProcessor(exporter, {
-						maxQueueSize: 512,
-						maxExportBatchSize: 64,
-						scheduledDelayMillis: 2_000,
+						maxQueueSize: config?.batchConfig?.maxQueueSize ?? 512,
+						maxExportBatchSize: config?.batchConfig?.maxExportBatchSize ?? 64,
+						scheduledDelayMillis:
+							config?.batchConfig?.scheduledDelayMillis ?? 2_000,
 					}),
 		],
 	});

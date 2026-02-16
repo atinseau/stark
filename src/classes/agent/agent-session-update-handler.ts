@@ -1,4 +1,5 @@
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { Cost, SessionUpdate } from "@agentclientprotocol/sdk";
+import { SpanStatusCode } from "@opentelemetry/api";
 import type pino from "pino";
 
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
@@ -11,12 +12,6 @@ import {
 	parseToolOutput,
 } from "../../utils/tool-parsing.ts";
 import type { Tracer } from "../tracer/tracer.ts";
-import {
-	endToolCall,
-	startToolCall,
-	updateToolCall,
-} from "./tracer-helpers/tool.ts";
-import { recordUsage } from "./tracer-helpers/usage.ts";
 
 // ── Internal Types ─────────────────────────────────────────────────────────
 
@@ -92,8 +87,9 @@ type UsageUpdate = Extract<SessionUpdate, { sessionUpdate: "usage_update" }>;
  * Each update type is handled by a dedicated private method, and the
  * discriminator values are centralised in the {@link SessionUpdateType} enum.
  *
- * Tracing is performed via external helper functions from `./tracer-helpers/`
- * that operate on the generic `Tracer` API (`startOperation`,
+ * Tracing is performed via private methods (`traceToolCallStart`,
+ * `traceToolCallUpdate`, `traceToolCallEnd`, `traceUsageUpdate`) that
+ * operate on the generic `Tracer` API (`startOperation`,
  * `trackSpan`, etc.), keeping the handler decoupled from tracer internals.
  *
  * @example
@@ -239,12 +235,12 @@ export class AgentSessionUpdateHandler {
 			command,
 		});
 
-		startToolCall(this.tracer, {
-			toolCallId: update.toolCallId,
-			title: update.title,
-			kind: update.kind ?? undefined,
+		this.traceToolCallStart(
+			update.toolCallId,
+			update.title,
+			update.kind ?? undefined,
 			command,
-		});
+		);
 
 		this.logger.info(
 			{
@@ -285,24 +281,8 @@ export class AgentSessionUpdateHandler {
 		const output = parseToolOutput(update.rawOutput);
 		const exitCode = parseExitCode(update.rawOutput);
 
-		// Tracing: update or end tool call span
-		if (update.status === "completed" || update.status === "failed") {
-			endToolCall(
-				this.tracer,
-				update.toolCallId,
-				update.status ?? undefined,
-				exitCode,
-			);
-		} else {
-			updateToolCall(
-				this.tracer,
-				update.toolCallId,
-				update.status ?? undefined,
-				output,
-				exitCode,
-			);
-		}
-
+		// Log FIRST while the tool call span is still in the context stack,
+		// so the log line carries the tool call's SpanId (not the prompt's).
 		this.logger.info(
 			{
 				toolCallId: update.toolCallId,
@@ -313,6 +293,22 @@ export class AgentSessionUpdateHandler {
 			},
 			`Tool update: ${title} → ${update.status ?? "update"}${exitCode != null ? ` (exit ${exitCode})` : ""}`,
 		);
+
+		// Tracing: update or end tool call span (after logging)
+		if (update.status === "completed" || update.status === "failed") {
+			this.traceToolCallEnd(
+				update.toolCallId,
+				update.status ?? undefined,
+				exitCode,
+			);
+		} else {
+			this.traceToolCallUpdate(
+				update.toolCallId,
+				update.status ?? undefined,
+				output,
+				exitCode,
+			);
+		}
 
 		this.emitEvent(AgentEvent.TOOL_UPDATE, {
 			toolCallId: update.toolCallId,
@@ -397,7 +393,7 @@ export class AgentSessionUpdateHandler {
 		const percent =
 			update.size > 0 ? Math.round((update.used / update.size) * 100) : 0;
 
-		recordUsage(this.tracer, update.used, update.size, percent);
+		this.traceUsageUpdate(update.used, update.size, percent, update.cost);
 
 		this.logger.info(
 			{
@@ -415,5 +411,106 @@ export class AgentSessionUpdateHandler {
 			contextPercent: percent,
 			cost: update.cost,
 		});
+	}
+
+	// ── Private Tracing Helpers ──────────────────────────────────────────
+
+	/**
+	 * Starts an `agent.tool_call` span as a child of the current active span
+	 * and tracks it by `toolCallId` so it can be ended later.
+	 */
+	private traceToolCallStart(
+		toolCallId: string,
+		title: string,
+		kind?: string,
+		command?: string,
+	): void {
+		const span = this.tracer.startOperation(
+			"agent.tool_call",
+			{
+				"tool.call_id": toolCallId,
+				"tool.title": title,
+				...(kind && { "tool.kind": kind }),
+				...(command && { "tool.command": command }),
+			},
+			"active",
+		);
+
+		this.tracer.trackSpan(toolCallId, span, "tool call");
+		this.tracer.enterSpan(span);
+	}
+
+	/**
+	 * Adds an update event to an active tool call span.
+	 * No-op if the tool call ID is unknown or tracing is disabled.
+	 */
+	private traceToolCallUpdate(
+		toolCallId: string,
+		status?: string,
+		output?: string,
+		exitCode?: number,
+	): void {
+		const span = this.tracer.getTrackedSpan(toolCallId);
+		if (!span || !span.isRecording()) return;
+
+		const eventAttrs: Record<string, string | number> = {};
+		if (status) eventAttrs.status = status;
+		if (output) eventAttrs.output = output.slice(0, 1000);
+		if (exitCode !== undefined) eventAttrs.exit_code = exitCode;
+
+		span.addEvent("tool.update", eventAttrs);
+	}
+
+	/**
+	 * Ends a tool call span, setting its status based on the outcome.
+	 * No-op if the tool call ID is unknown or tracing is disabled.
+	 */
+	private traceToolCallEnd(
+		toolCallId: string,
+		status?: string,
+		exitCode?: number,
+	): void {
+		const span = this.tracer.removeTrackedSpan(toolCallId);
+		if (!span || !span.isRecording()) return;
+
+		if (status) span.setAttribute("tool.status", status);
+		if (exitCode !== undefined) span.setAttribute("tool.exit_code", exitCode);
+
+		const failed =
+			status === "failed" || (exitCode !== undefined && exitCode !== 0);
+
+		span.setStatus(
+			failed
+				? {
+						code: SpanStatusCode.ERROR,
+						message: `Tool ${status ?? "failed"} (exit ${exitCode ?? "?"})`,
+					}
+				: { code: SpanStatusCode.OK },
+		);
+
+		this.tracer.leaveSpan(span);
+		span.end();
+	}
+
+	/**
+	 * Records a usage update as an event on the active span,
+	 * including optional cost information.
+	 */
+	private traceUsageUpdate(
+		used: number,
+		size: number,
+		percent: number,
+		cost?: Cost | null,
+	): void {
+		const attrs: Record<string, string | number> = {
+			"usage.context_used": used,
+			"usage.context_size": size,
+			"usage.context_percent": percent,
+		};
+		if (cost) {
+			attrs["usage.cost_amount"] = cost.amount;
+			attrs["usage.cost_currency"] = cost.currency;
+		}
+		this.tracer.recordEvent("active", "usage.update", attrs);
 	}
 }

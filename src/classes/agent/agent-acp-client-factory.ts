@@ -20,6 +20,7 @@ import type {
 	WriteTextFileRequest,
 	WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
+import { type Span, SpanStatusCode } from "@opentelemetry/api";
 import type pino from "pino";
 
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
@@ -30,8 +31,6 @@ import type {
 import type { EmitEventFn } from "../../types/observability.types.ts";
 import type { TerminalManager } from "../terminal-manager/terminal-manager.ts";
 import type { Tracer } from "../tracer/tracer.ts";
-import { endPermission, startPermission } from "./tracer-helpers/permission.ts";
-import { startTerminal } from "./tracer-helpers/terminal.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -71,8 +70,9 @@ export interface AgentAcpClientFactoryConfig {
  * Handlers use the private `logAndEmit` helper to combine logging and
  * event emission into a single call, eliminating the repeated
  * `logger.info(…) + emitEvent(…)` two-liner that previously appeared
- * in every handler. Tracing is handled via external helper functions
- * from `./tracer-helpers/` or via `tracer.traced()`.
+ * in every handler. Tracing is handled via private methods on this class
+ * (`tracePermissionStart`, `tracePermissionEnd`, `traceTerminalStart`)
+ * or via `tracer.traced()`.
  *
  * @example
  * ```ts
@@ -171,6 +171,104 @@ export class AgentAcpClientFactory {
 		};
 	}
 
+	// ── Private Tracing Helpers ────────────────────────────────────────────
+
+	/**
+	 * Starts an `agent.permission` span as a child of the relevant tool call
+	 * span (if found via tracked spans), or as a child of the active span.
+	 */
+	private tracePermissionStart(
+		toolCallId: string,
+		toolCallTitle?: string,
+	): Span {
+		const toolSpan = this.tracer.getTrackedSpan(toolCallId);
+		const parent = toolSpan ?? "active";
+
+		const span = this.tracer.startOperation(
+			"agent.permission",
+			{
+				"permission.tool_call_id": toolCallId,
+				...(toolCallTitle && {
+					"permission.tool_call_title": toolCallTitle,
+				}),
+			},
+			parent,
+		);
+
+		this.tracer.enterSpan(span);
+		return span;
+	}
+
+	/**
+	 * Ends a permission span with the outcome.
+	 *
+	 * Denied permissions use `SpanStatusCode.UNSET` (not ERROR) because a
+	 * denial is a valid business outcome, not an operational failure.
+	 */
+	private tracePermissionEnd(
+		span: Span,
+		outcome: "granted" | "denied",
+		details?: {
+			optionId?: string;
+			optionName?: string;
+			reason?: string;
+		},
+	): void {
+		if (!span.isRecording()) return;
+
+		span.setAttribute("permission.outcome", outcome);
+
+		if (details?.optionId) {
+			span.setAttribute("permission.option_id", details.optionId);
+		}
+		if (details?.optionName) {
+			span.setAttribute("permission.option_name", details.optionName);
+		}
+		if (details?.reason) {
+			span.setAttribute("permission.denial_reason", details.reason);
+		}
+
+		span.setStatus(
+			outcome === "granted"
+				? { code: SpanStatusCode.OK }
+				: { code: SpanStatusCode.UNSET },
+		);
+
+		this.tracer.leaveSpan(span);
+		span.end();
+	}
+
+	/**
+	 * Starts an `agent.terminal` span as a child of the active span
+	 * and tracks it by `terminalId` so it can be ended later.
+	 *
+	 * Args are stored as a native string array (OTel supports `string[]` natively).
+	 */
+	private traceTerminalStart(
+		terminalId: string,
+		command: string,
+		args?: string[],
+		cwd?: string,
+	): void {
+		const span = this.tracer.startOperation(
+			"agent.terminal",
+			{
+				"terminal.id": terminalId,
+				"terminal.command": command,
+				...(cwd && { "terminal.cwd": cwd }),
+			},
+			"active",
+		);
+
+		// TASK 9: Set args as native string array (OTel supports string[] natively)
+		if (args && args.length > 0) {
+			span.setAttribute("terminal.args", args);
+		}
+
+		this.tracer.trackSpan(terminalId, span, "terminal");
+		this.tracer.enterSpan(span);
+	}
+
 	// ── Private Helpers ────────────────────────────────────────────────────
 
 	/**
@@ -200,11 +298,11 @@ export class AgentAcpClientFactory {
 	): Promise<RequestPermissionResponse> {
 		const toolCallTitle = params.toolCall.title ?? params.toolCall.toolCallId;
 
-		// Tracing: start permission span (via helper)
-		const permSpan = startPermission(this.tracer, {
-			toolCallId: params.toolCall.toolCallId,
+		// Tracing: start permission span
+		const permSpan = this.tracePermissionStart(
+			params.toolCall.toolCallId,
 			toolCallTitle,
-		});
+		);
 
 		this.logAndEmit(
 			AgentEvent.PERMISSION_REQUESTED,
@@ -235,7 +333,7 @@ export class AgentAcpClientFactory {
 				);
 
 				// Tracing: end permission span (granted)
-				endPermission(permSpan, "granted", {
+				this.tracePermissionEnd(permSpan, "granted", {
 					optionId: allowOption.optionId,
 					optionName: allowOption.name,
 				});
@@ -265,7 +363,7 @@ export class AgentAcpClientFactory {
 		});
 
 		// Tracing: end permission span (denied)
-		endPermission(permSpan, "denied", { reason: denialReason });
+		this.tracePermissionEnd(permSpan, "denied", { reason: denialReason });
 
 		return { outcome: { outcome: "cancelled" as const } };
 	}
@@ -339,13 +437,15 @@ export class AgentAcpClientFactory {
 	): Promise<CreateTerminalResponse> {
 		const terminal = this.terminalManager.create(params);
 
-		// Tracing: start terminal span (tracked internally by terminalId via helper)
-		startTerminal(this.tracer, {
-			terminalId: terminal.terminalId,
-			command: terminal.command,
-			args: terminal.args,
-			cwd: terminal.cwd,
-		});
+		// Tracing: start terminal span (tracked internally by terminalId)
+		// enterSpan is called inside traceTerminalStart so that the log
+		// below carries the terminal span's ID.
+		this.traceTerminalStart(
+			terminal.terminalId,
+			terminal.command,
+			terminal.args,
+			terminal.cwd,
+		);
 
 		this.logAndEmit(
 			AgentEvent.TERMINAL_CREATED,
@@ -357,6 +457,13 @@ export class AgentAcpClientFactory {
 			},
 			`Terminal created: ${terminal.command}`,
 		);
+
+		// Leave the terminal span context after creation logging.
+		// The span stays tracked (open) until the terminal exits, but
+		// subsequent logs should not inherit the terminal's SpanId —
+		// the terminal runs in the background.
+		const termSpan = this.tracer.getTrackedSpan(terminal.terminalId);
+		if (termSpan) this.tracer.leaveSpan(termSpan);
 
 		return { terminalId: terminal.terminalId };
 	}
