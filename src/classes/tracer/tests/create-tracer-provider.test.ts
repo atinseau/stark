@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
-import { createTracerProvider } from "../src/tracer/create-tracer-provider.ts";
+import { createTracerProvider } from "../create-tracer-provider.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ describe("createTracerProvider", () => {
 		expect(resource).toBeDefined();
 
 		const attrs = resource.attributes;
-		expect(attrs["service.name"]).toBe("stark-agent");
+		expect(attrs["service.name"]).toBe("stark");
 		expect(attrs["service.version"]).toBe("0.1.0");
 	});
 });

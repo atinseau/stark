@@ -1,12 +1,9 @@
 import { describe, expect, it, mock } from "bun:test";
 import pino from "pino";
 import { AgentEvent } from "../../../enums/agent-event.enum.ts";
-import type {
-	AgentEventMap,
-	BaseAgentEvent,
-} from "../../../types/events.types.ts";
+import type { EmitEventFn } from "../../../types/observability.types.ts";
+import type { Tracer } from "../../tracer/tracer.ts";
 import { AgentSessionUpdateHandler } from "../agent-session-update-handler.ts";
-import type { AgentTracer } from "../agent-tracer.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -15,32 +12,62 @@ function silentLogger(): pino.Logger {
 	return pino({ level: "silent" });
 }
 
-/** Creates a minimal no-op AgentTracer mock. */
-function noopTracer(): AgentTracer {
+/**
+ * Creates a minimal no-op Tracer mock.
+ *
+ * Exposes the generic API (`startOperation`, `trackSpan`, `getTrackedSpan`,
+ * `removeTrackedSpan`, `recordEvent`) that the tracer helper functions use.
+ * Domain-specific methods have been extracted to `./tracer-helpers/` and
+ * operate on this generic API.
+ */
+function noopTracer(): Tracer {
+	/** Backing store for tracked spans so helpers can retrieve them. */
+	const tracked = new Map<string, { span: any; label: string }>();
+
+	/** A minimal mock span that satisfies the Span interface. */
+	const mockSpan = () => ({
+		setAttribute: mock(() => {}),
+		setAttributes: mock(() => {}),
+		addEvent: mock(() => {}),
+		setStatus: mock(() => {}),
+		end: mock(() => {}),
+		isRecording: () => true,
+		recordException: mock(() => {}),
+		spanContext: () => ({
+			traceId: "0".repeat(32),
+			spanId: "0".repeat(16),
+			traceFlags: 0,
+		}),
+		updateName: mock(() => {}),
+		addLink: mock(() => {}),
+		addLinks: mock(() => {}),
+	});
+
 	return {
 		enabled: false,
-		startToolCall: mock(() => {}),
-		updateToolCall: mock(() => {}),
-		endToolCall: mock(() => {}),
-		recordUsage: mock(() => {}),
-		startPermission: mock(() => ({})),
-		endPermission: mock(() => {}),
-		startFs: mock(() => ({})),
-		endFs: mock(() => {}),
-		startTerminal: mock(() => ({})),
-		endTerminal: mock(() => {}),
-		recordContextInjection: mock(() => {}),
-		startSession: mock(() => {}),
-		endSession: mock(() => {}),
-		startInitialize: mock(() => ({})),
-		startInitPhase: mock(() => ({})),
-		endInitialize: mock(() => {}),
-		startPrompt: mock(() => ({})),
-		endPrompt: mock(() => {}),
+		startRootSpan: mock(() => mockSpan()),
+		endRootSpan: mock(() => {}),
+		startActiveSpan: mock(() => mockSpan()),
+		endActiveSpan: mock(() => {}),
 		getTraceContext: mock(() => undefined),
+		startOperation: mock(() => mockSpan()),
+		endOperation: mock(() => {}),
+		traced: mock(async (_name: string, work: (span: any) => Promise<any>) =>
+			work(mockSpan()),
+		),
+		trackSpan: mock((id: string, span: any, label: string = "operation") => {
+			tracked.set(id, { span, label });
+		}),
+		getTrackedSpan: mock((id: string) => tracked.get(id)?.span),
+		removeTrackedSpan: mock((id: string) => {
+			const entry = tracked.get(id);
+			tracked.delete(id);
+			return entry?.span;
+		}),
+		recordEvent: mock(() => {}),
 		flush: mock(async () => {}),
 		shutdown: mock(async () => {}),
-	} as unknown as AgentTracer;
+	} as unknown as Tracer;
 }
 
 /**
@@ -50,10 +77,7 @@ function noopTracer(): AgentTracer {
 function createEventCollector() {
 	const events = new Map<string, any[]>();
 
-	const emitEvent = <K extends AgentEvent>(
-		event: K,
-		payload: Omit<AgentEventMap[K], keyof BaseAgentEvent>,
-	) => {
+	const emitEvent: EmitEventFn = (event, payload) => {
 		if (!events.has(event)) {
 			events.set(event, []);
 		}
@@ -301,7 +325,8 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 			rawInput: null,
 		} as any);
 
-		expect(tracer.startToolCall).toHaveBeenCalledTimes(1);
+		expect(tracer.startOperation).toHaveBeenCalledTimes(1);
+		expect(tracer.trackSpan).toHaveBeenCalledTimes(1);
 	});
 
 	it("handles tool_call with no kind or locations", () => {
@@ -446,7 +471,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			rawOutput: null,
 		} as any);
 
-		expect(tracer.endToolCall).toHaveBeenCalledTimes(1);
+		expect(tracer.removeTrackedSpan).toHaveBeenCalledTimes(1);
 	});
 
 	it("updates tracer tool call span on in-progress", () => {
@@ -472,7 +497,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			rawOutput: { content: "Working..." },
 		} as any);
 
-		expect(tracer.updateToolCall).toHaveBeenCalledTimes(1);
+		expect(tracer.getTrackedSpan).toHaveBeenCalledTimes(1);
 	});
 
 	it("uses toolCallId as fallback title for unknown tool calls", () => {
@@ -676,8 +701,12 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 			size: 10000,
 		} as any);
 
-		expect(tracer.recordUsage).toHaveBeenCalledTimes(1);
-		expect(tracer.recordUsage).toHaveBeenCalledWith(7500, 10000, 75);
+		expect(tracer.recordEvent).toHaveBeenCalledTimes(1);
+		expect(tracer.recordEvent).toHaveBeenCalledWith("auto", "usage.update", {
+			"usage.context_used": 7500,
+			"usage.context_size": 10000,
+			"usage.context_percent": 75,
+		});
 	});
 });
 

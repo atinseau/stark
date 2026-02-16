@@ -2,10 +2,12 @@ export type {
 	AgentConfig,
 	AgentIdentity,
 	AgentSnapshot,
+	ConsoleTransportConfig,
+	JsonTransportConfig,
 	LogOutputConfig,
 	PromptResult,
+	SeqTransportConfig,
 } from "./agent.types.ts";
-
 export type {
 	AgentBusyEvent,
 	AgentDestroyedEvent,
@@ -38,3 +40,8 @@ export type {
 	ToolUpdateEvent,
 	UsageUpdateEvent,
 } from "./events.types.ts";
+export type {
+	EmitEventFn,
+	LogTraceProvider,
+	TraceContext,
+} from "./observability.types.ts";

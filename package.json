@@ -7,7 +7,7 @@
 		"postinstall": "lefthook install",
 		"start": "bun run src/index.ts",
 		"test": "bun test",
-		"check": "biome check --write",
+		"check": "biome check --write --unsafe",
 		"check-types": "tsc --noEmit",
 		"up": "docker compose up -d",
 		"down": "docker compose down"

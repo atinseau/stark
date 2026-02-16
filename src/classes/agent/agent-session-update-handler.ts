@@ -3,17 +3,20 @@ import type pino from "pino";
 
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { SessionUpdateType } from "../../enums/session-update-type.enum.ts";
-import type {
-	AgentEventMap,
-	BaseAgentEvent,
-} from "../../types/events.types.ts";
+import type { EmitEventFn } from "../../types/observability.types.ts";
 import { truncate } from "../../utils/formatting.ts";
 import {
 	parseExitCode,
 	parseToolCommand,
 	parseToolOutput,
 } from "../../utils/tool-parsing.ts";
-import type { AgentTracer } from "./agent-tracer.ts";
+import type { Tracer } from "../tracer/tracer.ts";
+import {
+	endToolCall,
+	startToolCall,
+	updateToolCall,
+} from "./tracer-helpers/tool.ts";
+import { recordUsage } from "./tracer-helpers/usage.ts";
 
 // ── Internal Types ─────────────────────────────────────────────────────────
 
@@ -24,16 +27,6 @@ export interface TrackedToolCall {
 	status?: string;
 	command?: string;
 }
-
-/**
- * Callback signature used by the handler to emit typed agent events.
- * Matches the `emitTyped` pattern from the Agent class so that
- * the handler doesn't need to know about EventEmitter internals.
- */
-export type EmitEventFn = <K extends AgentEvent>(
-	event: K,
-	payload: Omit<AgentEventMap[K], keyof BaseAgentEvent>,
-) => void;
 
 // ── Narrowed Update Types ──────────────────────────────────────────────────
 
@@ -99,6 +92,10 @@ type UsageUpdate = Extract<SessionUpdate, { sessionUpdate: "usage_update" }>;
  * Each update type is handled by a dedicated private method, and the
  * discriminator values are centralised in the {@link SessionUpdateType} enum.
  *
+ * Tracing is performed via external helper functions from `./tracer-helpers/`
+ * that operate on the generic `Tracer` API (`startOperation`,
+ * `trackSpan`, etc.), keeping the handler decoupled from tracer internals.
+ *
  * @example
  * ```ts
  * const handler = new AgentSessionUpdateHandler(logger, tracer, emitEvent);
@@ -120,7 +117,7 @@ export class AgentSessionUpdateHandler {
 
 	constructor(
 		private readonly logger: pino.Logger,
-		private readonly tracer: AgentTracer,
+		private readonly tracer: Tracer,
 		private readonly emitEvent: EmitEventFn,
 	) {}
 
@@ -242,7 +239,7 @@ export class AgentSessionUpdateHandler {
 			command,
 		});
 
-		this.tracer.startToolCall({
+		startToolCall(this.tracer, {
 			toolCallId: update.toolCallId,
 			title: update.title,
 			kind: update.kind ?? undefined,
@@ -290,13 +287,15 @@ export class AgentSessionUpdateHandler {
 
 		// Tracing: update or end tool call span
 		if (update.status === "completed" || update.status === "failed") {
-			this.tracer.endToolCall(
+			endToolCall(
+				this.tracer,
 				update.toolCallId,
 				update.status ?? undefined,
 				exitCode,
 			);
 		} else {
-			this.tracer.updateToolCall(
+			updateToolCall(
+				this.tracer,
 				update.toolCallId,
 				update.status ?? undefined,
 				output,
@@ -398,7 +397,7 @@ export class AgentSessionUpdateHandler {
 		const percent =
 			update.size > 0 ? Math.round((update.used / update.size) * 100) : 0;
 
-		this.tracer.recordUsage(update.used, update.size, percent);
+		recordUsage(this.tracer, update.used, update.size, percent);
 
 		this.logger.info(
 			{

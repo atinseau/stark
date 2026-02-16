@@ -27,19 +27,13 @@ import type {
 	AgentEventMap,
 	BaseAgentEvent,
 } from "../../types/events.types.ts";
+import type { EmitEventFn } from "../../types/observability.types.ts";
 import type { TerminalManager } from "../terminal-manager/terminal-manager.ts";
-import type { AgentTracer } from "./agent-tracer.ts";
+import type { Tracer } from "../tracer/tracer.ts";
+import { endPermission, startPermission } from "./tracer-helpers/permission.ts";
+import { startTerminal } from "./tracer-helpers/terminal.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
-
-/**
- * Callback signature used by the factory to emit typed agent events.
- * Matches the `emitTyped` pattern from the Agent class.
- */
-export type EmitEventFn = <K extends AgentEvent>(
-	event: K,
-	payload: Omit<AgentEventMap[K], keyof BaseAgentEvent>,
-) => void;
 
 /**
  * Callback invoked when the ACP agent sends a session update notification.
@@ -72,6 +66,14 @@ export interface AgentAcpClientFactoryConfig {
  *   - **terminalManager** — for terminal lifecycle management
  *   - **config** — for permission auto-approve behavior
  *
+ * ### Instrumentation Pattern
+ *
+ * Handlers use the private `logAndEmit` helper to combine logging and
+ * event emission into a single call, eliminating the repeated
+ * `logger.info(…) + emitEvent(…)` two-liner that previously appeared
+ * in every handler. Tracing is handled via external helper functions
+ * from `./tracer-helpers/` or via `tracer.traced()`.
+ *
  * @example
  * ```ts
  * const factory = new AgentAcpClientFactory(logger, tracer, emitEvent, terminalManager, config);
@@ -82,7 +84,7 @@ export interface AgentAcpClientFactoryConfig {
 export class AgentAcpClientFactory {
 	constructor(
 		private readonly logger: pino.Logger,
-		private readonly tracer: AgentTracer,
+		private readonly tracer: Tracer,
 		private readonly emitEvent: EmitEventFn,
 		private readonly terminalManager: TerminalManager,
 		private readonly config: AgentAcpClientFactoryConfig,
@@ -169,6 +171,28 @@ export class AgentAcpClientFactory {
 		};
 	}
 
+	// ── Private Helpers ────────────────────────────────────────────────────
+
+	/**
+	 * Combines structured logging and typed event emission into a single call.
+	 *
+	 * This eliminates the repeated `logger.info(…); emitEvent(…);` two-liner
+	 * that otherwise appears in every handler. The event payload is reused as
+	 * the log object so the same attributes appear in both outputs.
+	 *
+	 * @param event      - The agent event type to emit.
+	 * @param payload    - The domain-specific event payload (also used as log bindings).
+	 * @param logMessage - The human-readable log message.
+	 */
+	private logAndEmit<K extends AgentEvent>(
+		event: K,
+		payload: Omit<AgentEventMap[K], keyof BaseAgentEvent>,
+		logMessage: string,
+	): void {
+		this.logger.info(payload as Record<string, unknown>, logMessage);
+		this.emitEvent(event, payload);
+	}
+
 	// ── Private Handlers ───────────────────────────────────────────────────
 
 	private async handlePermission(
@@ -176,29 +200,21 @@ export class AgentAcpClientFactory {
 	): Promise<RequestPermissionResponse> {
 		const toolCallTitle = params.toolCall.title ?? params.toolCall.toolCallId;
 
-		// Tracing: start permission span
-		const permSpan = this.tracer.startPermission({
+		// Tracing: start permission span (via helper)
+		const permSpan = startPermission(this.tracer, {
 			toolCallId: params.toolCall.toolCallId,
 			toolCallTitle,
 		});
 
-		this.logger.info(
+		this.logAndEmit(
+			AgentEvent.PERMISSION_REQUESTED,
 			{
 				toolCallId: params.toolCall.toolCallId,
-				options: params.options.map((o: PermissionOption) => ({
-					id: o.optionId,
-					name: o.name,
-					kind: o.kind,
-				})),
+				toolCallTitle,
+				options: params.options,
 			},
 			`Permission requested: ${toolCallTitle}`,
 		);
-
-		this.emitEvent(AgentEvent.PERMISSION_REQUESTED, {
-			toolCallId: params.toolCall.toolCallId,
-			toolCallTitle,
-			options: params.options,
-		});
 
 		if (this.config.autoApprove) {
 			// Find the first "allow" option
@@ -208,7 +224,8 @@ export class AgentAcpClientFactory {
 			);
 
 			if (allowOption) {
-				this.logger.info(
+				this.logAndEmit(
+					AgentEvent.PERMISSION_GRANTED,
 					{
 						toolCallId: params.toolCall.toolCallId,
 						optionId: allowOption.optionId,
@@ -217,14 +234,8 @@ export class AgentAcpClientFactory {
 					`Permission auto-approved: ${allowOption.name}`,
 				);
 
-				this.emitEvent(AgentEvent.PERMISSION_GRANTED, {
-					toolCallId: params.toolCall.toolCallId,
-					optionId: allowOption.optionId,
-					optionName: allowOption.name,
-				});
-
 				// Tracing: end permission span (granted)
-				this.tracer.endPermission(permSpan, "granted", {
+				endPermission(permSpan, "granted", {
 					optionId: allowOption.optionId,
 					optionName: allowOption.name,
 				});
@@ -254,7 +265,7 @@ export class AgentAcpClientFactory {
 		});
 
 		// Tracing: end permission span (denied)
-		this.tracer.endPermission(permSpan, "denied", { reason: denialReason });
+		endPermission(permSpan, "denied", { reason: denialReason });
 
 		return { outcome: { outcome: "cancelled" as const } };
 	}
@@ -262,78 +273,65 @@ export class AgentAcpClientFactory {
 	private async handleWriteTextFile(
 		params: WriteTextFileRequest,
 	): Promise<WriteTextFileResponse> {
-		// Tracing: start fs.write span
-		const fsSpan = this.tracer.startFs({
-			path: params.path,
-			operation: "write",
-			contentLength: params.content.length,
-		});
-
-		this.logger.info(
+		this.logAndEmit(
+			AgentEvent.FS_WRITE,
 			{ path: params.path, contentLength: params.content.length },
 			`FS write: ${params.path}`,
 		);
 
-		this.emitEvent(AgentEvent.FS_WRITE, {
-			path: params.path,
-			contentLength: params.content.length,
-		});
+		return this.tracer.traced(
+			"agent.fs.write",
+			async (span) => {
+				const { writeFile, mkdir } = await import("node:fs/promises");
+				const { dirname } = await import("node:path");
 
-		try {
-			const { writeFile, mkdir } = await import("node:fs/promises");
-			const { dirname } = await import("node:path");
+				await mkdir(dirname(params.path), { recursive: true });
+				await writeFile(params.path, params.content, "utf-8");
 
-			await mkdir(dirname(params.path), { recursive: true });
-			await writeFile(params.path, params.content, "utf-8");
-
-			this.logger.debug({ path: params.path }, "FS write complete");
-			this.tracer.endFs(fsSpan, params.content.length);
-			return {};
-		} catch (err) {
-			this.tracer.endFs(
-				fsSpan,
-				undefined,
-				err instanceof Error ? err : new Error(String(err)),
-			);
-			throw err;
-		}
+				span.setAttribute("fs.content_length", params.content.length);
+				this.logger.debug({ path: params.path }, "FS write complete");
+				return {};
+			},
+			{
+				attributes: {
+					"fs.path": params.path,
+					"fs.operation": "write",
+					"fs.content_length": params.content.length,
+				},
+				parent: "active",
+			},
+		);
 	}
 
 	private async handleReadTextFile(
 		params: ReadTextFileRequest,
 	): Promise<ReadTextFileResponse> {
-		// Tracing: start fs.read span
-		const fsSpan = this.tracer.startFs({
-			path: params.path,
-			operation: "read",
-		});
-
 		this.logger.info({ path: params.path }, `FS read: ${params.path}`);
 
-		try {
-			const { readFile } = await import("node:fs/promises");
-			const content = await readFile(params.path, "utf-8");
+		return this.tracer.traced(
+			"agent.fs.read",
+			async (span) => {
+				const { readFile } = await import("node:fs/promises");
+				const content = await readFile(params.path, "utf-8");
 
-			this.logger.debug(
-				{ path: params.path, contentLength: content.length },
-				"FS read complete",
-			);
+				span.setAttribute("fs.content_length", content.length);
 
-			this.emitEvent(AgentEvent.FS_READ, {
-				path: params.path,
-				contentLength: content.length,
-			});
+				this.logAndEmit(
+					AgentEvent.FS_READ,
+					{ path: params.path, contentLength: content.length },
+					"FS read complete",
+				);
 
-			this.tracer.endFs(fsSpan, content.length);
-			return { content };
-		} catch (err) {
-			this.tracer.endFs(
-				fsSpan,
-				undefined,
-				err instanceof Error ? err : new Error(String(err)),
-			);
-			throw err;
-		}
+				return { content };
+			},
+			{
+				attributes: {
+					"fs.path": params.path,
+					"fs.operation": "read",
+				},
+				parent: "active",
+			},
+		);
 	}
 
 	private async handleCreateTerminal(
@@ -341,15 +339,16 @@ export class AgentAcpClientFactory {
 	): Promise<CreateTerminalResponse> {
 		const terminal = this.terminalManager.create(params);
 
-		// Tracing: start terminal span
-		this.tracer.startTerminal({
+		// Tracing: start terminal span (tracked internally by terminalId via helper)
+		startTerminal(this.tracer, {
 			terminalId: terminal.terminalId,
 			command: terminal.command,
 			args: terminal.args,
 			cwd: terminal.cwd,
 		});
 
-		this.logger.info(
+		this.logAndEmit(
+			AgentEvent.TERMINAL_CREATED,
 			{
 				terminalId: terminal.terminalId,
 				command: terminal.command,
@@ -358,13 +357,6 @@ export class AgentAcpClientFactory {
 			},
 			`Terminal created: ${terminal.command}`,
 		);
-
-		this.emitEvent(AgentEvent.TERMINAL_CREATED, {
-			terminalId: terminal.terminalId,
-			command: terminal.command,
-			args: terminal.args,
-			cwd: terminal.cwd,
-		});
 
 		return { terminalId: terminal.terminalId };
 	}

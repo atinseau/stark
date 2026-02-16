@@ -17,10 +17,12 @@ import type { AgentEventMap } from "../../types/events.types.ts";
 import { isoNow, truncate } from "../../utils/formatting.ts";
 import { generateIdentity } from "../../utils/identity.ts";
 import { TerminalManager } from "../terminal-manager/terminal-manager.ts";
+import { Tracer } from "../tracer/tracer.ts";
 import { AgentAcpClientFactory } from "./agent-acp-client-factory.ts";
 import { AgentContextManager } from "./agent-context-manager.ts";
 import { AgentSessionUpdateHandler } from "./agent-session-update-handler.ts";
-import { AgentTracer } from "./agent-tracer.ts";
+import { recordContextInjection } from "./tracer-helpers/context.ts";
+import { endTerminalById } from "./tracer-helpers/terminal.ts";
 
 // ── Agent Class ────────────────────────────────────────────────────────────
 
@@ -115,7 +117,7 @@ export class Agent extends EventEmitter {
 	private readonly terminalManager = new TerminalManager();
 
 	/** OpenTelemetry tracer for distributed tracing to Seq. */
-	private readonly tracer: AgentTracer;
+	private readonly tracer: Tracer;
 
 	/** Pure-logic context injection queue manager. */
 	private readonly contextManager = new AgentContextManager();
@@ -163,21 +165,28 @@ export class Agent extends EventEmitter {
 		// Create tracer (no-op when tracing is disabled) — must be created
 		// BEFORE the logger so we can inject trace context into log bindings.
 		const tracingConfig = this.config.tracing;
-		this.tracer = new AgentTracer(this.identity, {
+		this.tracer = new Tracer({
 			enabled: !!tracingConfig,
 			...(typeof tracingConfig === "string" ? { endpoint: tracingConfig } : {}),
+			serviceName: "stark-agent",
+			tracerName: "stark-agent",
 		});
 
 		// Start the root session span immediately so traceId is available
-		this.tracer.startSession();
+		this.tracer.startRootSpan("agent.session", {
+			"agent.id": this.identity.id,
+			"agent.name": this.identity.name,
+		});
 
-		// Create logger with agent identity + trace context bindings.
-		// When tracing is enabled, every log line carries TraceId/SpanId so
-		// Seq can automatically correlate logs ↔ traces in its UI.
+		// Create logger with agent identity + dynamic trace context.
+		// When tracing is enabled, every log line dynamically carries the
+		// TraceId/SpanId of the *currently active* span (prompt, tool call, etc.)
+		// via pino's mixin option. This ensures Seq correlates each log line
+		// with the correct span, not just the root session span.
 		this.logger = createLogger(this.identity, {
 			logOutput: this.config.logOutput,
 			logLevel: this.config.logLevel,
-			traceContext: this.tracer.getTraceContext(),
+			traceContextProvider: () => this.tracer.getTraceContext(),
 		});
 
 		// Create the bound emitEvent callback for child components
@@ -214,6 +223,12 @@ export class Agent extends EventEmitter {
 				{ terminalId, exitCode: result.exitCode, signal: result.signal },
 				"Terminal exited",
 			);
+
+			// End the terminal span that was started in the ACP client factory.
+			// The span is tracked internally by terminalId so we don't need
+			// the original span reference.
+			endTerminalById(this.tracer, terminalId, result.exitCode, result.signal);
+
 			this.emitTyped(AgentEvent.TERMINAL_EXIT, {
 				terminalId,
 				exitCode: result.exitCode,
@@ -279,7 +294,11 @@ export class Agent extends EventEmitter {
 		this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
 
 		// ── Tracing: start prompt span ───────────────────────────────────
-		const promptSpan = this.tracer.startPrompt(promptIndex, fullPrompt);
+		const promptSpan = this.tracer.startActiveSpan("agent.prompt", {
+			"prompt.index": promptIndex,
+			"prompt.text": fullPrompt.slice(0, 500),
+			"prompt.text_length": fullPrompt.length,
+		});
 
 		if (!this.connection || !this._sessionId) {
 			throw new Error("Agent is not connected or has no session");
@@ -313,7 +332,10 @@ export class Agent extends EventEmitter {
 			);
 
 			// ── Tracing: end prompt span (success) ─────────────────────────
-			this.tracer.endPrompt(promptSpan, result.stopReason);
+			if (promptSpan.isRecording() && result.stopReason) {
+				promptSpan.setAttribute("prompt.stop_reason", result.stopReason);
+			}
+			this.tracer.endActiveSpan(promptSpan);
 
 			this.setStatus(AgentStatus.IDLE);
 			this.emitTyped(AgentEvent.AGENT_IDLE, {
@@ -328,7 +350,7 @@ export class Agent extends EventEmitter {
 			const error = err instanceof Error ? err : new Error(String(err));
 
 			// ── Tracing: end prompt span (error) ───────────────────────────
-			this.tracer.endPrompt(promptSpan, undefined, error);
+			this.tracer.endActiveSpan(promptSpan, error);
 
 			this.setStatus(AgentStatus.ERROR);
 			this.emitTyped(AgentEvent.AGENT_ERROR, {
@@ -388,7 +410,7 @@ export class Agent extends EventEmitter {
 		});
 
 		// ── Tracing: record context injection event ──────────────────────
-		this.tracer.recordContextInjection(instructions, queued);
+		recordContextInjection(this.tracer, instructions, queued);
 
 		// Push onto the pure-logic context queue
 		this.contextManager.inject(instructions);
@@ -544,7 +566,7 @@ export class Agent extends EventEmitter {
 	 */
 	private async initialize(): Promise<void> {
 		// ── Tracing: start initialize span ───────────────────────────────
-		const initSpan = this.tracer.startInitialize();
+		const initSpan = this.tracer.startOperation("agent.initialize", {}, "root");
 
 		this.logger.debug(
 			{ executable: this.config.executable },
@@ -552,19 +574,23 @@ export class Agent extends EventEmitter {
 		);
 
 		// Spawn the agent process — wrap in try-catch for ENOENT and similar errors
-		const spawnPhase = this.tracer.startInitPhase("spawn-process", initSpan);
+		const spawnPhase = this.tracer.startOperation(
+			"agent.initialize.spawn-process",
+			{},
+			initSpan,
+		);
 		let proc: ChildProcess;
 		try {
 			proc = spawn(this.config.executable, ["--acp", "--stdio"], {
 				stdio: ["pipe", "pipe", "inherit"],
 			});
-			this.tracer.endInitialize(spawnPhase);
+			this.tracer.endOperation(spawnPhase);
 		} catch (err) {
 			const error = new Error(
 				`Failed to spawn ACP process "${this.config.executable}": ${err instanceof Error ? err.message : String(err)}`,
 			);
-			this.tracer.endInitialize(spawnPhase, error);
-			this.tracer.endInitialize(initSpan, error);
+			this.tracer.endOperation(spawnPhase, error);
+			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
 
@@ -620,8 +646,9 @@ export class Agent extends EventEmitter {
 		// instead of hanging on the initialize() call.
 		this.logger.debug("Sending ACP initialize request");
 
-		const acpInitPhase = this.tracer.startInitPhase(
-			"acp-protocol-init",
+		const acpInitPhase = this.tracer.startOperation(
+			"agent.initialize.acp-protocol-init",
+			{},
 			initSpan,
 		);
 
@@ -640,11 +667,11 @@ export class Agent extends EventEmitter {
 				}),
 				spawnError,
 			]);
-			this.tracer.endInitialize(acpInitPhase);
+			this.tracer.endOperation(acpInitPhase);
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
-			this.tracer.endInitialize(acpInitPhase, error);
-			this.tracer.endInitialize(initSpan, error);
+			this.tracer.endOperation(acpInitPhase, error);
+			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
 
@@ -659,7 +686,11 @@ export class Agent extends EventEmitter {
 		// Create a new session
 		this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
 
-		const sessionPhase = this.tracer.startInitPhase("create-session", initSpan);
+		const sessionPhase = this.tracer.startOperation(
+			"agent.initialize.create-session",
+			{},
+			initSpan,
+		);
 
 		let sessionResult: Awaited<
 			ReturnType<acp.ClientSideConnection["newSession"]>
@@ -669,11 +700,11 @@ export class Agent extends EventEmitter {
 				cwd: this.config.cwd,
 				mcpServers: this.config.mcpServers ?? [],
 			});
-			this.tracer.endInitialize(sessionPhase);
+			this.tracer.endOperation(sessionPhase);
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
-			this.tracer.endInitialize(sessionPhase, error);
-			this.tracer.endInitialize(initSpan, error);
+			this.tracer.endOperation(sessionPhase, error);
+			this.tracer.endOperation(initSpan, error);
 			throw error;
 		}
 
@@ -682,7 +713,7 @@ export class Agent extends EventEmitter {
 		this.logger.info({ sessionId: this._sessionId }, "Session created");
 
 		// ── Tracing: end initialize span (success) ──────────────────────
-		this.tracer.endInitialize(initSpan);
+		this.tracer.endOperation(initSpan);
 
 		// Ready!
 		this.setStatus(AgentStatus.IDLE);

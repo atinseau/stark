@@ -1,6 +1,86 @@
 import pino from "pino";
-import type { TraceContext } from "../classes/agent/agent-tracer.ts";
 import type { AgentIdentity, LogOutputConfig } from "../types/agent.types.ts";
+import type {
+	LogTraceProvider,
+	TraceContext,
+} from "../types/observability.types.ts";
+
+// ── Internal Helpers ───────────────────────────────────────────────────────
+
+/**
+ * Resolves whether a console transport config is enabled and at what level.
+ */
+function resolveConsole(
+	config: LogOutputConfig["console"],
+	fallbackLevel: pino.Level,
+): { enabled: boolean; level: pino.Level } {
+	if (config == null || config === true) {
+		return { enabled: config ?? true, level: fallbackLevel };
+	}
+	if (config === false) {
+		return { enabled: false, level: fallbackLevel };
+	}
+	// Object form: ConsoleTransportConfig
+	return { enabled: config.enabled, level: config.level ?? fallbackLevel };
+}
+
+/**
+ * Resolves whether a JSON transport config is enabled, where to write, and at what level.
+ */
+function resolveJson(
+	config: LogOutputConfig["json"],
+	fallbackLevel: pino.Level,
+): {
+	enabled: boolean;
+	destination: string | number | false;
+	level: pino.Level;
+} {
+	if (config == null || config === false) {
+		return { enabled: false, destination: false, level: fallbackLevel };
+	}
+	if (config === true) {
+		// Write to stdout (fd 1)
+		return { enabled: true, destination: 1, level: fallbackLevel };
+	}
+	if (typeof config === "string") {
+		return { enabled: true, destination: config, level: fallbackLevel };
+	}
+	// Object form: JsonTransportConfig
+	const dest = config.destination === true ? 1 : config.destination;
+	return {
+		enabled: true,
+		destination: dest,
+		level: config.level ?? fallbackLevel,
+	};
+}
+
+/**
+ * Resolves whether a Seq transport config is enabled, the server URL, and the level.
+ */
+function resolveSeq(
+	config: LogOutputConfig["seq"],
+	fallbackLevel: pino.Level,
+): { enabled: boolean; serverUrl: string; level: pino.Level } {
+	const defaultUrl = process.env.SEQ_URL ?? "http://localhost:5341";
+
+	if (config == null || config === false) {
+		return { enabled: false, serverUrl: defaultUrl, level: fallbackLevel };
+	}
+	if (config === true) {
+		return { enabled: true, serverUrl: defaultUrl, level: fallbackLevel };
+	}
+	if (typeof config === "string") {
+		return { enabled: true, serverUrl: config, level: fallbackLevel };
+	}
+	// Object form: SeqTransportConfig
+	return {
+		enabled: true,
+		serverUrl: config.url ?? defaultUrl,
+		level: config.level ?? fallbackLevel,
+	};
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
 
 /**
  * Creates a configured pino logger instance for an Agent.
@@ -22,6 +102,33 @@ import type { AgentIdentity, LogOutputConfig } from "../types/agent.types.ts";
  * All transports can be active simultaneously. If none is enabled,
  * a silent logger is returned (useful in tests).
  *
+ * Each transport can have its own log level. When the transport config is
+ * a simple boolean/string, the global `logLevel` is used. When the transport
+ * config is an object with a `level` field, that level takes precedence:
+ *
+ * ```ts
+ * // Console shows info, JSON captures debug, Seq captures everything
+ * const logger = createLogger(identity, {
+ *   logOutput: {
+ *     console: { enabled: true, level: "info" },
+ *     json:    { destination: "./logs/agent.ndjson", level: "debug" },
+ *     seq:     { level: "trace" },
+ *   },
+ *   logLevel: "info",
+ * });
+ * ```
+ *
+ * ### Trace Context Correlation
+ *
+ * When `traceContextProvider` is supplied, every log line dynamically carries
+ * the `TraceId` and `SpanId` of the **currently active** span (via pino's
+ * `mixin` option). This allows Seq to correlate logs with the correct span,
+ * even as the active span changes across prompts and tool calls.
+ *
+ * The older `traceContext` option injects a **static** TraceId/SpanId that
+ * never changes. Prefer `traceContextProvider` for accurate span-level
+ * correlation. When both are provided, the dynamic provider takes precedence.
+ *
  * @param identity - The agent's identity, used to tag every log line.
  * @param config   - Which outputs to enable and at what log level.
  * @returns A configured `pino.Logger` instance.
@@ -38,12 +145,16 @@ import type { AgentIdentity, LogOutputConfig } from "../types/agent.types.ts";
  *
  * @example
  * ```ts
- * // With Seq enabled (requires `docker compose up -d`):
+ * // With dynamic trace context (recommended):
  * const logger = createLogger(
  *   { id: "abc-123", name: "Swift Nova" },
- *   { logOutput: { console: true, json: "./logs/agent.ndjson", seq: true }, logLevel: "debug" }
+ *   {
+ *     logOutput: { console: true, seq: true },
+ *     logLevel: "info",
+ *     traceContextProvider: () => tracer.getTraceContext(),
+ *   }
  * );
- * // Then open http://localhost:8082 to visualize logs in real time.
+ * // Every log line now carries the TraceId/SpanId of the active span.
  * ```
  */
 export function createLogger(
@@ -52,24 +163,37 @@ export function createLogger(
 		logOutput?: LogOutputConfig;
 		logLevel?: pino.Level;
 		/**
-		 * Optional trace context from the AgentTracer.
-		 * When provided, every log line carries `TraceId` and `SpanId` fields
-		 * so Seq can automatically correlate logs ↔ traces in its UI.
+		 * @deprecated Use `traceContextProvider` for dynamic span-level correlation.
+		 *
+		 * Static trace context injected into every log line's base bindings.
+		 * The TraceId/SpanId will be fixed to whatever span was active at
+		 * logger creation time — they won't follow prompt or tool call spans.
 		 */
 		traceContext?: TraceContext;
+		/**
+		 * Dynamic trace context provider.
+		 *
+		 * Called on every log write via pino's `mixin` option. Returns the
+		 * `TraceId` and `SpanId` of the currently active span so that Seq
+		 * can correlate each log line with the correct span.
+		 *
+		 * Takes precedence over the static `traceContext` option.
+		 */
+		traceContextProvider?: LogTraceProvider;
 	},
 ): pino.Logger {
-	const level = config?.logLevel ?? "info";
-	const consoleEnabled = config?.logOutput?.console ?? true;
-	const jsonOutput = config?.logOutput?.json ?? false;
+	const globalLevel = config?.logLevel ?? "info";
 
-	const seqOutput = config?.logOutput?.seq ?? false;
+	// ── Resolve transport configs ──────────────────────────────────────
+	const consoleCfg = resolveConsole(config?.logOutput?.console, globalLevel);
+	const jsonCfg = resolveJson(config?.logOutput?.json, globalLevel);
+	const seqCfg = resolveSeq(config?.logOutput?.seq, globalLevel);
 
 	// Collect transports to enable
 	const targets: pino.TransportTargetOptions[] = [];
 
-	// ── Console transport (pino-pretty) ────────────────────────────────────
-	if (consoleEnabled) {
+	// ── Console transport (pino-pretty) ────────────────────────────────
+	if (consoleCfg.enabled) {
 		targets.push({
 			target: "pino-pretty",
 			options: {
@@ -77,43 +201,37 @@ export function createLogger(
 				translateTime: "HH:MM:ss.l",
 				ignore: "pid,hostname",
 				messageFormat: "{agentName} | {msg}",
-				// Show the agent name in every pretty-printed line
 				customPrettifiers: {},
 			},
-			level,
+			level: consoleCfg.level,
 		});
 	}
 
-	// ── JSON transport ─────────────────────────────────────────────────────
-	if (jsonOutput) {
-		if (typeof jsonOutput === "string") {
+	// ── JSON transport ─────────────────────────────────────────────────
+	if (jsonCfg.enabled && jsonCfg.destination !== false) {
+		if (typeof jsonCfg.destination === "string") {
 			// Write JSON to a file
 			targets.push({
 				target: "pino/file",
-				options: { destination: jsonOutput, mkdir: true },
-				level,
+				options: { destination: jsonCfg.destination, mkdir: true },
+				level: jsonCfg.level,
 			});
 		} else {
 			// Write JSON to stdout (fd 1)
 			targets.push({
 				target: "pino/file",
-				options: { destination: 1 },
-				level,
+				options: { destination: jsonCfg.destination },
+				level: jsonCfg.level,
 			});
 		}
 	}
 
-	// ── Seq transport (pino-seq) ───────────────────────────────────────────
-	if (seqOutput) {
-		const serverUrl =
-			typeof seqOutput === "string"
-				? seqOutput
-				: (process.env.SEQ_URL ?? "http://localhost:5341");
-
+	// ── Seq transport (pino-seq) ───────────────────────────────────────
+	if (seqCfg.enabled) {
 		targets.push({
 			target: "pino-seq",
 			options: {
-				serverUrl,
+				serverUrl: seqCfg.serverUrl,
 				// Batch logs every 2s for performance
 				batchSizeLimit: 50,
 				eventSizeLimit: 1_048_576,
@@ -122,35 +240,62 @@ export function createLogger(
 					console.warn(`[pino-seq] Failed to send logs to Seq: ${e.message}`);
 				},
 			},
-			level,
+			level: seqCfg.level,
 		});
 	}
 
-	// ── No transports → silent logger ──────────────────────────────────────
+	// ── No transports → silent logger ──────────────────────────────────
 	if (targets.length === 0) {
 		return pino({ level: "silent" });
 	}
 
-	// ── Build the multi-transport logger ───────────────────────────────────
+	// ── Build the multi-transport logger ───────────────────────────────
 	const transport = pino.transport({ targets });
 
-	// Build base bindings: agent identity + optional trace context.
-	// Seq recognises PascalCase `TraceId` / `SpanId` fields and uses them
-	// to link log events to their parent trace automatically.
+	// ── Base bindings: agent identity ──────────────────────────────────
+	// Static fields that never change across the logger's lifetime.
 	const base: Record<string, string> = {
 		agentId: identity.id,
 		agentName: identity.name,
 	};
 
-	if (config?.traceContext) {
+	// If only the static traceContext is provided (no dynamic provider),
+	// bake TraceId/SpanId into the base bindings for backward compat.
+	if (config?.traceContext && !config?.traceContextProvider) {
 		base.TraceId = config.traceContext.TraceId;
 		base.SpanId = config.traceContext.SpanId;
 	}
 
+	// ── Dynamic trace context via mixin ────────────────────────────────
+	// When a traceContextProvider is supplied, pino calls our mixin on
+	// every log write to inject the current TraceId/SpanId. This ensures
+	// logs are correlated with the *active* span, not just the root session.
+	const traceProvider = config?.traceContextProvider;
+	const mixin = traceProvider
+		? (): Record<string, string> => {
+				const ctx = traceProvider();
+				if (ctx) {
+					return { TraceId: ctx.TraceId, SpanId: ctx.SpanId };
+				}
+				return {};
+			}
+		: undefined;
+
+	// The global level must be the lowest of all transport levels so that
+	// pino doesn't filter out messages before they reach a transport that
+	// wants them. Each transport's own `level` acts as a secondary filter.
+	const lowestLevel = findLowestLevel(
+		globalLevel,
+		consoleCfg.enabled ? consoleCfg.level : undefined,
+		jsonCfg.enabled ? jsonCfg.level : undefined,
+		seqCfg.enabled ? seqCfg.level : undefined,
+	);
+
 	return pino(
 		{
-			level,
+			level: lowestLevel,
 			base,
+			...(mixin && { mixin }),
 		},
 		transport,
 	);
@@ -162,4 +307,35 @@ export function createLogger(
  */
 export function createSilentLogger(): pino.Logger {
 	return pino({ level: "silent" });
+}
+
+// ── Level Ordering ─────────────────────────────────────────────────────────
+
+/** pino levels ordered from most to least verbose. */
+const LEVEL_ORDER: pino.Level[] = [
+	"trace",
+	"debug",
+	"info",
+	"warn",
+	"error",
+	"fatal",
+];
+
+/**
+ * Returns the most verbose (lowest) level among the provided values.
+ * This ensures the root logger doesn't filter out messages that a
+ * more verbose transport still wants to receive.
+ */
+function findLowestLevel(...levels: (pino.Level | undefined)[]): pino.Level {
+	let lowestIndex = LEVEL_ORDER.length - 1;
+
+	for (const level of levels) {
+		if (!level) continue;
+		const idx = LEVEL_ORDER.indexOf(level);
+		if (idx !== -1 && idx < lowestIndex) {
+			lowestIndex = idx;
+		}
+	}
+
+	return LEVEL_ORDER[lowestIndex] ?? "info";
 }

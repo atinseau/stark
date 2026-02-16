@@ -31,7 +31,7 @@ export interface TracerProviderConfig {
 
 	/**
 	 * Service name reported in traces.
-	 * @default "stark-agent"
+	 * @default "stark"
 	 */
 	serviceName?: string;
 
@@ -90,7 +90,7 @@ export function createTracerProvider(
 	config?: TracerProviderConfig,
 ): BasicTracerProvider {
 	const endpoint = resolveEndpoint(config?.endpoint);
-	const serviceName = config?.serviceName ?? "stark-agent";
+	const serviceName = config?.serviceName ?? "stark";
 	const serviceVersion = config?.serviceVersion ?? "0.1.0";
 
 	// ── OTLP Exporter ───────────────────────────────────────────────────
