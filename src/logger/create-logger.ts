@@ -205,9 +205,9 @@ export function createLogger(
 				? pino.destination({
 						dest: jsonCfg.destination,
 						mkdir: true,
-						sync: false,
+						sync: true,
 					})
-				: pino.destination({ dest: jsonCfg.destination, sync: false });
+				: pino.destination({ dest: jsonCfg.destination, sync: true });
 
 		streams.push({
 			level: jsonCfg.level,

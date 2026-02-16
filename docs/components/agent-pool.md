@@ -797,7 +797,7 @@ Tous les prompts sont des templates Handlebars pré-compilés :
 ```typescript
 const pool = new AgentPool({
   openRouterApiKey: process.env.OPENROUTER_API_KEY!,
-  model: "anthropic/claude-sonnet-4-20250514",
+  model: "anthropic/claude-opus-4.6",
   agentConfig: { cwd: "/my/project", autoApprove: true },
 });
 
@@ -885,7 +885,7 @@ interface AgentPoolConfig {
   /** Clé API OpenRouter (obligatoire). */
   openRouterApiKey: string;
 
-  /** Modèle LLM. Défaut : "anthropic/claude-sonnet-4-20250514" */
+  /** Modèle LLM. Défaut : "anthropic/claude-opus-4.6" */
   model?: string;
 
   /** Config de base pour les agents spawnés. */
