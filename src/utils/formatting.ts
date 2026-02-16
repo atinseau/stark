@@ -9,49 +9,49 @@
 
 /** ANSI escape sequences for terminal styling. */
 export const ansi = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  italic: "\x1b[3m",
-  underline: "\x1b[4m",
+	reset: "\x1b[0m",
+	bold: "\x1b[1m",
+	dim: "\x1b[2m",
+	italic: "\x1b[3m",
+	underline: "\x1b[4m",
 
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  magenta: "\x1b[35m",
-  cyan: "\x1b[36m",
-  white: "\x1b[37m",
-  gray: "\x1b[90m",
+	red: "\x1b[31m",
+	green: "\x1b[32m",
+	yellow: "\x1b[33m",
+	blue: "\x1b[34m",
+	magenta: "\x1b[35m",
+	cyan: "\x1b[36m",
+	white: "\x1b[37m",
+	gray: "\x1b[90m",
 
-  bgRed: "\x1b[41m",
-  bgGreen: "\x1b[42m",
-  bgYellow: "\x1b[43m",
-  bgBlue: "\x1b[44m",
+	bgRed: "\x1b[41m",
+	bgGreen: "\x1b[42m",
+	bgYellow: "\x1b[43m",
+	bgBlue: "\x1b[44m",
 } as const;
 
 // ── Icon Maps ──────────────────────────────────────────────────────────────
 
 /** Maps tool call execution statuses to display icons. */
 export const STATUS_ICONS: Record<string, string> = {
-  pending: "⏳",
-  in_progress: "⚙️ ",
-  completed: "✅",
-  failed: "❌",
+	pending: "⏳",
+	in_progress: "⚙️ ",
+	completed: "✅",
+	failed: "🛑",
 };
 
 /** Maps tool kinds (read, edit, execute, etc.) to display icons. */
 export const KIND_ICONS: Record<string, string> = {
-  read: "📖",
-  edit: "✏️ ",
-  delete: "🗑️ ",
-  move: "📦",
-  search: "🔍",
-  execute: "▶️ ",
-  think: "🧠",
-  fetch: "🌐",
-  switch_mode: "🔄",
-  other: "🔧",
+	read: "📖",
+	edit: "✏️ ",
+	delete: "🗑️ ",
+	move: "📦",
+	search: "🔍",
+	execute: "▶️ ",
+	think: "🧠",
+	fetch: "🌐",
+	switch_mode: "🔄",
+	other: "🔧",
 };
 
 // ── Formatting Functions ───────────────────────────────────────────────────
@@ -65,7 +65,7 @@ export const KIND_ICONS: Record<string, string> = {
  * ```
  */
 export function timestamp(): string {
-  return new Date().toISOString().slice(11, 23);
+	return new Date().toISOString().slice(11, 23);
 }
 
 /**
@@ -77,7 +77,7 @@ export function timestamp(): string {
  * ```
  */
 export function isoNow(): string {
-  return new Date().toISOString();
+	return new Date().toISOString();
 }
 
 /**
@@ -99,13 +99,14 @@ export function isoNow(): string {
  * ```
  */
 export function renderBar(percent: number): string {
-  const width = 20;
-  const clamped = Math.max(0, Math.min(100, percent));
-  const filled = Math.round((clamped / 100) * width);
-  const empty = width - filled;
-  const color = clamped > 80 ? ansi.red : clamped > 50 ? ansi.yellow : ansi.green;
+	const width = 20;
+	const clamped = Math.max(0, Math.min(100, percent));
+	const filled = Math.round((clamped / 100) * width);
+	const empty = width - filled;
+	const color =
+		clamped > 80 ? ansi.red : clamped > 50 ? ansi.yellow : ansi.green;
 
-  return `${color}${"█".repeat(filled)}${ansi.dim}${"░".repeat(empty)}${ansi.reset}`;
+	return `${color}${"█".repeat(filled)}${ansi.dim}${"░".repeat(empty)}${ansi.reset}`;
 }
 
 /**
@@ -123,8 +124,8 @@ export function renderBar(percent: number): string {
  * ```
  */
 export function truncate(text: string, maxLength = 200): string {
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength)}… (${text.length} chars)`;
+	if (text.length <= maxLength) return text;
+	return `${text.slice(0, maxLength)}… (${text.length} chars)`;
 }
 
 /**
@@ -140,10 +141,10 @@ export function truncate(text: string, maxLength = 200): string {
  * @returns A dim, styled separator string (no trailing newline).
  */
 export function separator(label?: string): string {
-  const totalWidth = 60;
-  if (label) {
-    const remaining = Math.max(0, totalWidth - 5 - label.length);
-    return `${ansi.dim}──── ${ansi.bold}${label} ${ansi.dim}${"─".repeat(remaining)}${ansi.reset}`;
-  }
-  return `${ansi.dim}${"─".repeat(totalWidth)}${ansi.reset}`;
+	const totalWidth = 60;
+	if (label) {
+		const remaining = Math.max(0, totalWidth - 5 - label.length);
+		return `${ansi.dim}──── ${ansi.bold}${label} ${ansi.dim}${"─".repeat(remaining)}${ansi.reset}`;
+	}
+	return `${ansi.dim}${"─".repeat(totalWidth)}${ansi.reset}`;
 }

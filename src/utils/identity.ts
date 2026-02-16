@@ -17,13 +17,13 @@ import type { AgentIdentity } from "../types/agent.types.ts";
  * ```
  */
 export function generateIdentity(overrides?: {
-  id?: string;
-  name?: string;
+	id?: string;
+	name?: string;
 }): AgentIdentity {
-  return {
-    id: overrides?.id ?? crypto.randomUUID(),
-    name: overrides?.name ?? generateAgentName(),
-  };
+	return {
+		id: overrides?.id ?? crypto.randomUUID(),
+		name: overrides?.name ?? generateAgentName(),
+	};
 }
 
 /**
@@ -32,11 +32,11 @@ export function generateIdentity(overrides?: {
  * Examples: "Swift Elena", "Clever Atlas", "Bold Orion"
  */
 function generateAgentName(): string {
-  const adjective = faker.word.adjective({ length: { min: 3, max: 8 } });
-  const firstName = faker.person.firstName();
+	const adjective = faker.word.adjective({ length: { min: 3, max: 8 } });
+	const firstName = faker.person.firstName();
 
-  // Capitalize the adjective to keep it clean
-  const capitalized = adjective.charAt(0).toUpperCase() + adjective.slice(1);
+	// Capitalize the adjective to keep it clean
+	const capitalized = adjective.charAt(0).toUpperCase() + adjective.slice(1);
 
-  return `${capitalized} ${firstName}`;
+	return `${capitalized} ${firstName}`;
 }

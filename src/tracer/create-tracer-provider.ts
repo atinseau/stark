@@ -1,52 +1,52 @@
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
-  BasicTracerProvider,
-  BatchSpanProcessor,
-  SimpleSpanProcessor,
+	BasicTracerProvider,
+	BatchSpanProcessor,
+	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import {
-  ATTR_SERVICE_NAME,
-  ATTR_SERVICE_VERSION,
+	ATTR_SERVICE_NAME,
+	ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
 
 /**
  * Configuration options for the OpenTelemetry tracer provider.
  */
 export interface TracerProviderConfig {
-  /**
-   * OTLP endpoint URL for trace ingestion.
-   *
-   * For Seq, this is typically `http://localhost:5341/ingest/otlp/v1/traces`.
-   * Falls back to `SEQ_URL` env var (with the OTLP path appended),
-   * then to the default `http://localhost:5341/ingest/otlp/v1/traces`.
-   */
-  endpoint?: string;
+	/**
+	 * OTLP endpoint URL for trace ingestion.
+	 *
+	 * For Seq, this is typically `http://localhost:5341/ingest/otlp/v1/traces`.
+	 * Falls back to `SEQ_URL` env var (with the OTLP path appended),
+	 * then to the default `http://localhost:5341/ingest/otlp/v1/traces`.
+	 */
+	endpoint?: string;
 
-  /**
-   * Optional API key for authenticated ingestion (Seq `X-Seq-ApiKey`).
-   * Not required for local dev with no authentication.
-   */
-  apiKey?: string;
+	/**
+	 * Optional API key for authenticated ingestion (Seq `X-Seq-ApiKey`).
+	 * Not required for local dev with no authentication.
+	 */
+	apiKey?: string;
 
-  /**
-   * Service name reported in traces.
-   * @default "stark-agent"
-   */
-  serviceName?: string;
+	/**
+	 * Service name reported in traces.
+	 * @default "stark-agent"
+	 */
+	serviceName?: string;
 
-  /**
-   * Service version reported in traces.
-   * @default "0.1.0"
-   */
-  serviceVersion?: string;
+	/**
+	 * Service version reported in traces.
+	 * @default "0.1.0"
+	 */
+	serviceVersion?: string;
 
-  /**
-   * When `true`, spans are exported immediately (useful for debugging).
-   * When `false`, spans are batched for better performance.
-   * @default false
-   */
-  immediateExport?: boolean;
+	/**
+	 * When `true`, spans are exported immediately (useful for debugging).
+	 * When `false`, spans are batched for better performance.
+	 * @default false
+	 */
+	immediateExport?: boolean;
 }
 
 /**
@@ -56,11 +56,11 @@ export interface TracerProviderConfig {
  * ingestion API, under the path `/ingest/otlp/v1/traces`.
  */
 function resolveEndpoint(explicit?: string): string {
-  if (explicit) return explicit;
+	if (explicit) return explicit;
 
-  const seqUrl = process.env.SEQ_URL ?? "http://localhost:5341";
-  // Strip trailing slash if present, then append the OTLP traces path
-  return `${seqUrl.replace(/\/+$/, "")}/ingest/otlp/v1/traces`;
+	const seqUrl = process.env.SEQ_URL ?? "http://localhost:5341";
+	// Strip trailing slash if present, then append the OTLP traces path
+	return `${seqUrl.replace(/\/+$/, "")}/ingest/otlp/v1/traces`;
 }
 
 /**
@@ -87,42 +87,42 @@ function resolveEndpoint(explicit?: string): string {
  * ```
  */
 export function createTracerProvider(
-  config?: TracerProviderConfig,
+	config?: TracerProviderConfig,
 ): BasicTracerProvider {
-  const endpoint = resolveEndpoint(config?.endpoint);
-  const serviceName = config?.serviceName ?? "stark-agent";
-  const serviceVersion = config?.serviceVersion ?? "0.1.0";
+	const endpoint = resolveEndpoint(config?.endpoint);
+	const serviceName = config?.serviceName ?? "stark-agent";
+	const serviceVersion = config?.serviceVersion ?? "0.1.0";
 
-  // ── OTLP Exporter ───────────────────────────────────────────────────
-  const headers: Record<string, string> = {};
-  if (config?.apiKey) {
-    headers["X-Seq-ApiKey"] = config.apiKey;
-  }
+	// ── OTLP Exporter ───────────────────────────────────────────────────
+	const headers: Record<string, string> = {};
+	if (config?.apiKey) {
+		headers["X-Seq-ApiKey"] = config.apiKey;
+	}
 
-  const exporter = new OTLPTraceExporter({
-    url: endpoint,
-    headers,
-  });
+	const exporter = new OTLPTraceExporter({
+		url: endpoint,
+		headers,
+	});
 
-  // ── Resource ────────────────────────────────────────────────────────
-  const resource = resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: serviceName,
-    [ATTR_SERVICE_VERSION]: serviceVersion,
-  });
+	// ── Resource ────────────────────────────────────────────────────────
+	const resource = resourceFromAttributes({
+		[ATTR_SERVICE_NAME]: serviceName,
+		[ATTR_SERVICE_VERSION]: serviceVersion,
+	});
 
-  // ── Provider ────────────────────────────────────────────────────────
-  const provider = new BasicTracerProvider({
-    resource,
-    spanProcessors: [
-      config?.immediateExport
-        ? new SimpleSpanProcessor(exporter)
-        : new BatchSpanProcessor(exporter, {
-          maxQueueSize: 512,
-          maxExportBatchSize: 64,
-          scheduledDelayMillis: 2_000,
-        }),
-    ],
-  });
+	// ── Provider ────────────────────────────────────────────────────────
+	const provider = new BasicTracerProvider({
+		resource,
+		spanProcessors: [
+			config?.immediateExport
+				? new SimpleSpanProcessor(exporter)
+				: new BatchSpanProcessor(exporter, {
+						maxQueueSize: 512,
+						maxExportBatchSize: 64,
+						scheduledDelayMillis: 2_000,
+					}),
+		],
+	});
 
-  return provider;
+	return provider;
 }

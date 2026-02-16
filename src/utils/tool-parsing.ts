@@ -31,16 +31,16 @@
  * ```
  */
 export function parseToolCommand(rawInput: unknown): string | undefined {
-  if (rawInput == null || typeof rawInput !== "object") return undefined;
+	if (rawInput == null || typeof rawInput !== "object") return undefined;
 
-  const obj = rawInput as Record<string, unknown>;
+	const obj = rawInput as Record<string, unknown>;
 
-  // Primary shape: { command: "..." }
-  if (typeof obj.command === "string" && obj.command.trim()) {
-    return obj.command.trim();
-  }
+	// Primary shape: { command: "..." }
+	if (typeof obj.command === "string" && obj.command.trim()) {
+		return obj.command.trim();
+	}
 
-  return undefined;
+	return undefined;
 }
 
 // ── Output Extraction ──────────────────────────────────────────────────────
@@ -65,11 +65,11 @@ export function parseToolCommand(rawInput: unknown): string | undefined {
  * ```
  */
 export function parseToolOutput(rawOutput: unknown): string | undefined {
-  const text = extractRawText(rawOutput);
-  if (text == null) return undefined;
+	const text = extractRawText(rawOutput);
+	if (text == null) return undefined;
 
-  const cleaned = stripExitMarker(text).trim();
-  return cleaned || undefined;
+	const cleaned = stripExitMarker(text).trim();
+	return cleaned || undefined;
 }
 
 // ── Exit Code Extraction ───────────────────────────────────────────────────
@@ -91,15 +91,15 @@ export function parseToolOutput(rawOutput: unknown): string | undefined {
  * ```
  */
 export function parseExitCode(rawOutput: unknown): number | undefined {
-  const text = extractRawText(rawOutput);
-  if (text == null) return undefined;
+	const text = extractRawText(rawOutput);
+	if (text == null) return undefined;
 
-  const match = text.match(/<exited with exit code (\d+)>/);
-  if (match?.[1] != null) {
-    return parseInt(match[1], 10);
-  }
+	const match = text.match(/<exited with exit code (\d+)>/);
+	if (match?.[1] != null) {
+		return parseInt(match[1], 10);
+	}
 
-  return undefined;
+	return undefined;
 }
 
 // ── Internal Helpers ───────────────────────────────────────────────────────
@@ -114,25 +114,25 @@ export function parseExitCode(rawOutput: unknown): number | undefined {
  *   - `{ content: string, detailedContent: string }` (prefers `content`)
  */
 function extractRawText(rawOutput: unknown): string | undefined {
-  if (rawOutput == null) return undefined;
+	if (rawOutput == null) return undefined;
 
-  if (typeof rawOutput === "string") return rawOutput;
+	if (typeof rawOutput === "string") return rawOutput;
 
-  if (typeof rawOutput === "object") {
-    const obj = rawOutput as Record<string, unknown>;
+	if (typeof rawOutput === "object") {
+		const obj = rawOutput as Record<string, unknown>;
 
-    if (typeof obj.content === "string") return obj.content;
-    if (typeof obj.detailedContent === "string") return obj.detailedContent;
+		if (typeof obj.content === "string") return obj.content;
+		if (typeof obj.detailedContent === "string") return obj.detailedContent;
 
-    // Last resort: JSON-serialize the object so consumers at least get something
-    try {
-      return JSON.stringify(rawOutput, null, 2);
-    } catch {
-      return String(rawOutput);
-    }
-  }
+		// Last resort: JSON-serialize the object so consumers at least get something
+		try {
+			return JSON.stringify(rawOutput, null, 2);
+		} catch {
+			return String(rawOutput);
+		}
+	}
 
-  return String(rawOutput);
+	return String(rawOutput);
 }
 
 /**
@@ -140,5 +140,5 @@ function extractRawText(rawOutput: unknown): string | undefined {
  * appends to command output.
  */
 function stripExitMarker(text: string): string {
-  return text.replace(/\n?<exited with exit code \d+>\s*$/, "");
+	return text.replace(/\n?<exited with exit code \d+>\s*$/, "");
 }
