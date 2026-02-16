@@ -18,6 +18,7 @@
  *   - A running ACP-compatible agent executable (e.g. Copilot CLI)
  */
 
+import { join } from "path";
 import { AgentPool } from "../classes/agent-pool/agent-pool.ts";
 import { PoolEvent } from "../enums/pool-event.enum.ts";
 import { ansi, separator, truncate } from "../utils/formatting.ts";
@@ -76,7 +77,7 @@ export async function main(): Promise<void> {
     logLevel: "info",
 
     // Working directory for all spawned agents
-    cwd: process.cwd(),
+    cwd: join(process.cwd(), 'agent-workspace'),
 
     // Agent-specific configuration (no need to repeat logOutput/logLevel/cwd)
     agentConfig: {
@@ -260,7 +261,7 @@ export async function main(): Promise<void> {
 
   const task =
     process.argv[2] ??
-    "I want to create a ping pong web server in node.js with a client and a server that is in a complete separate folder (client and server), server is starting and waiting for a client and client, when it start, try to connect to the server, and ping and pong start in the console";
+    "I want to develop a morpion game in javascript with a server and a client. Client wait for an user to join the game and then start. The game is won when a player align 3 pieces. Write the code for the server and the client, and write tests for the server. Ui should have a fency ui with animations and sounds.";
 
   info("💬", `Task: ${ansi.blue}${truncate(task, 120)}${ansi.reset}`);
   process.stderr.write("\n");
