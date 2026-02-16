@@ -1,14 +1,14 @@
 import type pino from "pino";
-import type { ContextTracker } from "./context-tracker.ts";
-import type { ConversationManager } from "./conversation-manager.ts";
-import { ConversationRole } from "./enums.ts";
-import { sharingDecisionPrompt } from "./prompts/templates.ts";
+import { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import { sharingDecisionPrompt } from "../../prompts/index.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
 	SharingDecision,
 	TaskDependency,
-} from "./types.ts";
+} from "../../types/agent-pool.types.ts";
+import type { ContextTracker } from "./context-tracker.ts";
+import type { ConversationManager } from "./conversation-manager.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 

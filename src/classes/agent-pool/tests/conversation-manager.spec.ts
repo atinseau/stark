@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
-
+import { ConversationRole } from "../../../enums/conversation-role.enum.ts";
+import type { OpenRouterConfig } from "../../../types/agent-pool.types.ts";
 import { ConversationManager } from "../conversation-manager.ts";
-import { ConversationRole } from "../enums.ts";
-import type { OpenRouterConfig } from "../types.ts";
 import { silentLogger } from "./test-helpers.ts";
 
 // ════════════════════════════════════════════════════════════════════════════

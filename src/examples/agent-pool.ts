@@ -19,7 +19,7 @@
  */
 
 import { AgentPool } from "../classes/agent-pool/agent-pool.ts";
-import { PoolEvent } from "../classes/agent-pool/enums.ts";
+import { PoolEvent } from "../enums/pool-event.enum.ts";
 import { ansi, separator, truncate } from "../utils/formatting.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -65,15 +65,19 @@ export async function main(): Promise<void> {
 		// The agents themselves use their own model via ACP
 		model: "anthropic/claude-sonnet-4-20250514",
 
-		// Base configuration applied to all spawned agents
+		// Log output config — applies to the pool AND all spawned agents
+		logOutput: {
+			console: true,
+			seq: true,
+		},
+		logLevel: "info",
+
+		// Working directory for all spawned agents
+		cwd: process.cwd(),
+
+		// Agent-specific configuration (no need to repeat logOutput/logLevel/cwd)
 		agentConfig: {
-			cwd: process.cwd(),
 			autoApprove: true,
-			logOutput: {
-				console: true,
-				seq: false,
-			},
-			logLevel: "info",
 		},
 
 		// Maximum concurrent agents (prevents resource exhaustion)
@@ -253,7 +257,7 @@ export async function main(): Promise<void> {
 
 	const task =
 		process.argv[2] ??
-		"Create a simple TypeScript utility module with a function that formats dates in ISO format and another that calculates the difference between two dates in days. Include JSDoc comments.";
+		"I want to create a ping pong web server in node.js with a client and a server that is in a complete separate folder (client and server), server is starting and waiting for a client and client, when it start, try to connect to the server, and ping and pong start in the console";
 
 	info("💬", `Task: ${ansi.blue}${truncate(task, 120)}${ansi.reset}`);
 	process.stderr.write("\n");

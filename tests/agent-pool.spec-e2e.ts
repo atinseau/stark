@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { AgentPool } from "../src/classes/agent-pool/agent-pool.ts";
-import { PoolEvent } from "../src/classes/agent-pool/enums.ts";
 import {
 	collectPoolEvents,
 	createMockAgent,
 	createMockAgentFactory,
 } from "../src/classes/agent-pool/tests/test-helpers.ts";
+import { PoolEvent } from "../src/enums/pool-event.enum.ts";
 import type {
 	AgentPoolConfig,
 	AgentPoolResult,
 	AgentPoolState,
 	PoolManagedAgent,
-} from "../src/classes/agent-pool/types.ts";
+} from "../src/types/agent-pool.types.ts";
 
 /**
  * Helper: checks whether a `send()` response is a string or an AgentPoolResult.
@@ -62,10 +62,8 @@ function e2ePoolConfig(overrides?: Partial<AgentPoolConfig>): AgentPoolConfig {
 		maxAgents: 3,
 		maxRetries: 2,
 		temperature: 0,
-		agentConfig: {
-			logOutput: { console: false, json: false },
-			logLevel: "silent" as any,
-		},
+		logOutput: { console: false, json: false },
+		logLevel: "silent" as any,
 		createAgent: createMockAgentFactory(),
 		...overrides,
 	};

@@ -1,14 +1,14 @@
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../enums/agent-status.enum.ts";
+import { DeltaType } from "../../enums/delta-type.enum.ts";
 import type { PromptResult } from "../../types/agent.types.ts";
-import { isoNow } from "../../utils/formatting.ts";
-import { DeltaType } from "./enums.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
 	ContextEvent,
 	SubTask,
-} from "./types.ts";
+} from "../../types/agent-pool.types.ts";
+import { isoNow } from "../../utils/formatting.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 

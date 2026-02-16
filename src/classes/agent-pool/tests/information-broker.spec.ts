@@ -1,9 +1,8 @@
 import { describe, expect, it, mock } from "bun:test";
-
+import { DeltaType } from "../../../enums/delta-type.enum.ts";
+import type { ContextDelta, SubTask } from "../../../types/agent-pool.types.ts";
 import { ContextTracker } from "../context-tracker.ts";
-import { DeltaType } from "../enums.ts";
 import { InformationBroker } from "../information-broker.ts";
-import type { ContextDelta, SubTask } from "../types.ts";
 import { silentLogger } from "./test-helpers.ts";
 
 // ════════════════════════════════════════════════════════════════════════════

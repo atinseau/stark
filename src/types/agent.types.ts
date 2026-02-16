@@ -1,4 +1,5 @@
 import type { McpServer, StopReason, Usage } from "@agentclientprotocol/sdk";
+import type { SpanContext } from "@opentelemetry/api";
 import type pino from "pino";
 
 // ── Per-Transport Level Config ─────────────────────────────────────────────
@@ -137,6 +138,28 @@ export interface AgentConfig {
 	 * by selecting the first "allow" option. Defaults to `true`.
 	 */
 	autoApprove?: boolean;
+
+	/**
+	 * Optional parent span context for cross-tracer linking.
+	 *
+	 * When provided, the Agent's tracer will create its root span as a
+	 * child of this span context. This is used by the AgentPool to link
+	 * all agent traces under the pool's execution trace, creating a
+	 * unified trace hierarchy:
+	 *
+	 *   pool.execution (AgentPool root)
+	 *   ├── pool.agent.spawn (per agent)
+	 *   │   └── agent.session (Agent root — linked via parentSpanContext)
+	 *   │       ├── agent.prompt
+	 *   │       │   ├── agent.tool_call
+	 *   │       │   └── …
+	 *   │       └── …
+	 *   └── …
+	 *
+	 * The span context is typically obtained from the parent tracer via
+	 * `Tracer.getRootSpanContext()` or `Tracer.getActiveSpanContext()`.
+	 */
+	parentSpanContext?: SpanContext;
 }
 
 // ── Prompt Result ──────────────────────────────────────────────────────────

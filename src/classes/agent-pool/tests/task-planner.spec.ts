@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { ExecutionStrategy, TaskComplexity } from "../enums.ts";
+import { ExecutionStrategy } from "../../../enums/execution-strategy.enum.ts";
+import { TaskComplexity } from "../../../enums/task-complexity.enum.ts";
 import { multiTaskAnalysis, singleTaskAnalysis } from "./test-helpers.ts";
 
 // ════════════════════════════════════════════════════════════════════════════

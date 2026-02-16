@@ -63,6 +63,35 @@ export interface TracerConfig extends TracerProviderConfig {
 	 * @default "0.1.0"
 	 */
 	tracerVersion?: string;
+
+	/**
+	 * Optional parent span context for cross-tracer linking.
+	 *
+	 * When provided, the root span created by {@link Tracer.startRootSpan}
+	 * will be a child of this span context. This is used to link traces
+	 * across tracer boundaries — for example, linking an Agent's trace
+	 * to the AgentPool's trace that spawned it.
+	 *
+	 * The span context is typically obtained from the parent tracer via
+	 * {@link Tracer.getRootSpanContext}.
+	 *
+	 * @example
+	 * ```ts
+	 * // In the parent (e.g., AgentPool):
+	 * const poolTracer = new Tracer({ serviceName: "stark-pool" });
+	 * poolTracer.startRootSpan("pool.execution");
+	 * const parentCtx = poolTracer.getRootSpanContext();
+	 *
+	 * // In the child (e.g., Agent):
+	 * const agentTracer = new Tracer({
+	 *   serviceName: "stark-agent",
+	 *   parentSpanContext: parentCtx,
+	 * });
+	 * // The agent's root span will be a child of the pool's root span
+	 * agentTracer.startRootSpan("agent.session");
+	 * ```
+	 */
+	parentSpanContext?: SpanContext;
 }
 
 // ── Parent Strategy ────────────────────────────────────────────────────────
@@ -227,6 +256,12 @@ export class Tracer {
 	/** The underlying OTel tracer instance (null when disabled). */
 	private tracer: OtelTracer | null = null;
 
+	/**
+	 * Optional parent span context for cross-tracer linking.
+	 * When set, the root span will be created as a child of this context.
+	 */
+	private readonly parentSpanContext: SpanContext | null = null;
+
 	/** The root span that is the parent of all other spans. */
 	private rootSpan: Span | null = null;
 
@@ -297,6 +332,7 @@ export class Tracer {
 					serviceName: config?.serviceName ?? DEFAULT_SERVICE_NAME,
 				});
 			this.tracer = this.provider.getTracer(tracerName, tracerVersion);
+			this.parentSpanContext = config?.parentSpanContext ?? null;
 		}
 	}
 
@@ -325,9 +361,67 @@ export class Tracer {
 			this.rootSpan.end();
 		}
 
-		const span = this.tracer.startSpan(name, { attributes });
+		// If a parent span context was provided, create the root span as a
+		// child of that context. This links the entire trace tree of this
+		// Tracer instance under the parent (e.g., AgentPool → Agent).
+		let span: Span;
+		if (this.parentSpanContext) {
+			const remoteParent = trace.wrapSpanContext(this.parentSpanContext);
+			const parentCtx = trace.setSpan(context.active(), remoteParent);
+			span = this.tracer.startSpan(name, { attributes }, parentCtx);
+			this.spanParents.set(span, remoteParent);
+		} else {
+			span = this.tracer.startSpan(name, { attributes });
+		}
+
 		this.rootSpan = span;
 		return span;
+	}
+
+	/**
+	 * Returns the `SpanContext` of the current root span, or `undefined`
+	 * if tracing is disabled or no root span has been started.
+	 *
+	 * This is used to pass the root span's context to child Tracer
+	 * instances (e.g., from AgentPool to Agent) so that their root spans
+	 * become children of this span, creating a unified trace hierarchy.
+	 *
+	 * @example
+	 * ```ts
+	 * const poolTracer = new Tracer({ serviceName: "stark-pool" });
+	 * poolTracer.startRootSpan("pool.execution");
+	 *
+	 * // Pass to a child tracer
+	 * const parentCtx = poolTracer.getRootSpanContext();
+	 * const childTracer = new Tracer({
+	 *   serviceName: "stark-agent",
+	 *   parentSpanContext: parentCtx,
+	 * });
+	 * ```
+	 */
+	getRootSpanContext(): SpanContext | undefined {
+		if (!this.enabled || !this.rootSpan || this.rootSpan === NOOP_SPAN) {
+			return undefined;
+		}
+		return this.rootSpan.spanContext();
+	}
+
+	/**
+	 * Returns the `SpanContext` of the currently active span (or the most
+	 * specific span in scope), or `undefined` if tracing is disabled.
+	 *
+	 * Resolution order: span stack top → active span → root span.
+	 *
+	 * This is useful for creating child spans in external tracer instances
+	 * that should be linked to the most specific currently active operation.
+	 */
+	getActiveSpanContext(): SpanContext | undefined {
+		if (!this.enabled) return undefined;
+
+		const span = this.spanStack.at(-1) ?? this.activeSpan ?? this.rootSpan;
+		if (!span || span === NOOP_SPAN) return undefined;
+
+		return span.spanContext();
 	}
 
 	/**

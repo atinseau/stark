@@ -1,14 +1,15 @@
 import type pino from "pino";
-import { isoNow } from "../../utils/formatting.ts";
-import type { ConversationManager } from "./conversation-manager.ts";
-import { ConversationRole, DeltaType } from "./enums.ts";
-import { notificationDecisionPrompt } from "./prompts/templates.ts";
+import { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import { DeltaType } from "../../enums/delta-type.enum.ts";
+import { notificationDecisionPrompt } from "../../prompts/index.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
 	NotificationPreference,
 	UserNotification,
-} from "./types.ts";
+} from "../../types/agent-pool.types.ts";
+import { isoNow } from "../../utils/formatting.ts";
+import type { ConversationManager } from "./conversation-manager.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 

@@ -1,13 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import {
-	ConversationRole,
-	DeltaType,
-	ExecutionStrategy,
-	PoolEvent,
-	TaskComplexity,
-	UserIntent,
-} from "../enums.ts";
+import { ConversationRole } from "../../../enums/conversation-role.enum.ts";
+import { DeltaType } from "../../../enums/delta-type.enum.ts";
+import { ExecutionStrategy } from "../../../enums/execution-strategy.enum.ts";
+import { PoolEvent } from "../../../enums/pool-event.enum.ts";
+import { TaskComplexity } from "../../../enums/task-complexity.enum.ts";
+import { UserIntent } from "../../../enums/user-intent.enum.ts";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Enum Tests

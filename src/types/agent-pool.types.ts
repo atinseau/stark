@@ -1,18 +1,18 @@
-import type { AgentStatus } from "../../enums/agent-status.enum.ts";
+import type pino from "pino";
+import type { AgentStatus } from "../enums/agent-status.enum.ts";
+import type { ConversationRole } from "../enums/conversation-role.enum.ts";
+import type { DeltaType } from "../enums/delta-type.enum.ts";
+import type { ExecutionStrategy } from "../enums/execution-strategy.enum.ts";
+import type { PoolEvent } from "../enums/pool-event.enum.ts";
+import type { ReactionAction } from "../enums/reaction-action.enum.ts";
+import type { TaskComplexity } from "../enums/task-complexity.enum.ts";
+import type { UserIntent } from "../enums/user-intent.enum.ts";
 import type {
 	AgentConfig,
 	AgentIdentity,
+	LogOutputConfig,
 	PromptResult,
-} from "../../types/agent.types.ts";
-import type {
-	ConversationRole,
-	DeltaType,
-	ExecutionStrategy,
-	PoolEvent,
-	ReactionAction,
-	TaskComplexity,
-	UserIntent,
-} from "./enums.ts";
+} from "./agent.types.ts";
 
 // ── OpenRouter Types ───────────────────────────────────────────────────────
 
@@ -394,8 +394,47 @@ export interface AgentPoolConfig {
 	readonly model?: string;
 
 	/**
-	 * Base configuration applied to all spawned agents.
-	 * Individual agent configs can be overridden per subtask.
+	 * Configure which log outputs are active for the pool **and** all
+	 * spawned agents.
+	 *
+	 * This controls the pool's own logger as well as being forwarded
+	 * automatically to every agent created by the pool.
+	 *
+	 * - `console: false` → no console output from the pool or its agents
+	 * - `seq: false`     → no logs **or traces** are sent to Seq
+	 *
+	 * Individual agents inherit this setting unless explicitly overridden
+	 * via `agentConfig.logOutput`.
+	 */
+	readonly logOutput?: LogOutputConfig;
+
+	/**
+	 * Minimum pino log level for the pool and all spawned agents.
+	 * Defaults to `"info"`.
+	 *
+	 * Automatically forwarded to every agent created by the pool.
+	 * Can be overridden per-agent via `agentConfig.logLevel`.
+	 */
+	readonly logLevel?: pino.Level;
+
+	/**
+	 * Working directory for all spawned agents.
+	 * Defaults to `process.cwd()`.
+	 *
+	 * Automatically forwarded to every agent created by the pool.
+	 * Can be overridden per-agent via `agentConfig.cwd`.
+	 */
+	readonly cwd?: string;
+
+	/**
+	 * Additional agent-specific configuration applied to all spawned agents.
+	 *
+	 * Pool-level `logOutput`, `logLevel`, and `cwd` are automatically
+	 * forwarded to agents. Only use `agentConfig` for agent-specific
+	 * settings such as `autoApprove`, `executable`, or `mcpServers`.
+	 *
+	 * If `agentConfig` also specifies `logOutput`, `logLevel`, or `cwd`,
+	 * those values take precedence over the pool-level defaults.
 	 */
 	readonly agentConfig?: AgentConfig;
 
@@ -429,6 +468,40 @@ export interface AgentPoolConfig {
 	 * that conforms to the agent interface used by the pool.
 	 */
 	readonly createAgent?: AgentFactory;
+
+	/**
+	 * Enable OpenTelemetry tracing for the pool and all spawned agents.
+	 *
+	 * When enabled, the pool creates a root trace that encompasses the
+	 * entire execution lifecycle. All agents spawned by the pool
+	 * automatically inherit the pool's trace context, creating a
+	 * unified trace hierarchy:
+	 *
+	 *   pool.execution (AgentPool root span)
+	 *   ├── pool.planning
+	 *   ├── pool.agent.spawn (per agent)
+	 *   │   └── agent.session (Agent root — linked via parentSpanContext)
+	 *   │       ├── agent.prompt
+	 *   │       │   ├── agent.tool_call
+	 *   │       │   └── …
+	 *   │       └── …
+	 *   ├── pool.execute-subtasks
+	 *   │   └── pool.subtask.execute (per subtask)
+	 *   ├── pool.summary
+	 *   └── pool.cleanup
+	 *
+	 * - `true`   → traces are sent to the default endpoint derived from
+	 *               `SEQ_URL` (`http://localhost:5341/ingest/otlp/v1/traces`)
+	 * - `string` → traces are sent to the provided OTLP endpoint URL
+	 * - `false`  → tracing is disabled (default)
+	 *
+	 * When this is set, it also propagates to spawned agents so that
+	 * agent traces are linked under the pool's root span.
+	 *
+	 * **Note:** When `logOutput.seq` is explicitly `false`, tracing is
+	 * disabled regardless of this setting — no data is sent to Seq.
+	 */
+	readonly tracing?: boolean | string;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────

@@ -1,3 +1,10 @@
 export { AgentEvent } from "./agent-event.enum.ts";
 export { AgentStatus } from "./agent-status.enum.ts";
+export { ConversationRole } from "./conversation-role.enum.ts";
+export { DeltaType } from "./delta-type.enum.ts";
+export { ExecutionStrategy } from "./execution-strategy.enum.ts";
+export { PoolEvent } from "./pool-event.enum.ts";
+export { ReactionAction } from "./reaction-action.enum.ts";
 export { SessionUpdateType } from "./session-update-type.enum.ts";
+export { TaskComplexity } from "./task-complexity.enum.ts";
+export { UserIntent } from "./user-intent.enum.ts";

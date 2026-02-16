@@ -1,0 +1,58 @@
+export {
+	contextAnalysisPrompt,
+	contextAnalysisSystemPrompt,
+} from "./context-analysis.ts";
+export {
+	intentAnalysisPrompt,
+	intentAnalysisSystemPrompt,
+} from "./intent-analysis.ts";
+export { notificationDecisionPrompt } from "./notification-decision.ts";
+export { planningSystemPrompt, taskAnalysisPrompt } from "./planning.ts";
+export { sharingDecisionPrompt } from "./sharing-decision.ts";
+export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
+
+// ── Template Index ─────────────────────────────────────────────────────────
+
+import {
+	contextAnalysisPrompt,
+	contextAnalysisSystemPrompt,
+} from "./context-analysis.ts";
+import {
+	intentAnalysisPrompt,
+	intentAnalysisSystemPrompt,
+} from "./intent-analysis.ts";
+import { notificationDecisionPrompt } from "./notification-decision.ts";
+import { planningSystemPrompt, taskAnalysisPrompt } from "./planning.ts";
+import { sharingDecisionPrompt } from "./sharing-decision.ts";
+import { summaryPrompt, summarySystemPrompt } from "./summary.ts";
+
+/**
+ * All compiled Handlebars templates used by the AgentPool system.
+ *
+ * Each template is pre-compiled at module load time for performance.
+ * Templates use `noEscape: true` to prevent HTML entity encoding,
+ * which is unnecessary for LLM prompts and would corrupt code snippets.
+ */
+export const templates = {
+	// Planning
+	planningSystem: planningSystemPrompt,
+	taskAnalysis: taskAnalysisPrompt,
+
+	// Context analysis
+	contextAnalysisSystem: contextAnalysisSystemPrompt,
+	contextAnalysis: contextAnalysisPrompt,
+
+	// Information sharing
+	sharingDecision: sharingDecisionPrompt,
+
+	// Notifications
+	notificationDecision: notificationDecisionPrompt,
+
+	// Intent analysis
+	intentAnalysisSystem: intentAnalysisSystemPrompt,
+	intentAnalysis: intentAnalysisPrompt,
+
+	// Execution summary
+	summarySystem: summarySystemPrompt,
+	summary: summaryPrompt,
+} as const;

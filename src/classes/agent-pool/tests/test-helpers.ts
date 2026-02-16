@@ -3,18 +3,20 @@ import pino from "pino";
 
 import { AgentEvent } from "../../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../../enums/agent-status.enum.ts";
+import { ExecutionStrategy } from "../../../enums/execution-strategy.enum.ts";
+import type { PoolEvent } from "../../../enums/pool-event.enum.ts";
+import { TaskComplexity } from "../../../enums/task-complexity.enum.ts";
 import type {
 	AgentConfig,
 	AgentIdentity,
 	PromptResult,
 } from "../../../types/agent.types.ts";
-import type { AgentPool } from "../agent-pool.ts";
-import { ExecutionStrategy, type PoolEvent, TaskComplexity } from "../enums.ts";
 import type {
 	AgentPoolConfig,
 	PoolManagedAgent,
 	TaskAnalysis,
-} from "../types.ts";
+} from "../../../types/agent-pool.types.ts";
+import type { AgentPool } from "../agent-pool.ts";
 
 // ── Silent logger for component tests ──────────────────────────────────────
 
@@ -31,10 +33,8 @@ export function silentPoolConfig(
 	return {
 		openRouterApiKey: "test-key-not-real",
 		model: "test/model",
-		agentConfig: {
-			logOutput: { console: false, json: false },
-			logLevel: "silent" as any,
-		},
+		logOutput: { console: false, json: false },
+		logLevel: "silent" as any,
 		...overrides,
 	};
 }

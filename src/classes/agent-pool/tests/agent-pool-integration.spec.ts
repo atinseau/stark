@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { EventEmitter } from "node:events";
-
+import { PoolEvent } from "../../../enums/pool-event.enum.ts";
 import { AgentPool } from "../agent-pool.ts";
-import { PoolEvent } from "../enums.ts";
 import {
 	collectPoolEvents,
 	createMockAgentFactory,

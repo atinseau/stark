@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, it } from "bun:test";
 
 import { AgentEvent } from "../../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../../enums/agent-status.enum.ts";
+import { DeltaType } from "../../../enums/delta-type.enum.ts";
 import type { PromptResult } from "../../../types/agent.types.ts";
+import type { SubTask } from "../../../types/agent-pool.types.ts";
 import { ContextTracker } from "../context-tracker.ts";
-import { DeltaType } from "../enums.ts";
-import type { SubTask } from "../types.ts";
 
 describe("ContextTracker", () => {
 	let tracker: ContextTracker;

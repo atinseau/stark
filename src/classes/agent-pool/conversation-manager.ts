@@ -1,13 +1,13 @@
 import type pino from "pino";
 
-import type { ConversationRole } from "./enums.ts";
-import { OpenRouterClient } from "./openrouter-client.ts";
+import type { ConversationRole } from "../../enums/conversation-role.enum.ts";
 import type {
 	ChatOptions,
 	Conversation,
 	OpenRouterConfig,
 	OpenRouterMessage,
-} from "./types.ts";
+} from "../../types/agent-pool.types.ts";
+import { OpenRouterClient } from "./openrouter-client.ts";
 
 // ── ConversationManager ────────────────────────────────────────────────────
 

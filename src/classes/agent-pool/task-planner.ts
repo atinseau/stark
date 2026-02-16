@@ -1,15 +1,17 @@
 import type pino from "pino";
-import type { ConversationManager } from "./conversation-manager.ts";
-import {
-	ConversationRole,
-	ExecutionStrategy,
-	TaskComplexity,
-} from "./enums.ts";
+import { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import { ExecutionStrategy } from "../../enums/execution-strategy.enum.ts";
+import { TaskComplexity } from "../../enums/task-complexity.enum.ts";
 import {
 	planningSystemPrompt,
 	taskAnalysisPrompt,
-} from "./prompts/templates.ts";
-import type { SubTask, TaskAnalysis, TaskDependency } from "./types.ts";
+} from "../../prompts/index.ts";
+import type {
+	SubTask,
+	TaskAnalysis,
+	TaskDependency,
+} from "../../types/agent-pool.types.ts";
+import type { ConversationManager } from "./conversation-manager.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 

@@ -8,6 +8,7 @@
 		"start": "bun run src/index.ts",
 		"test": "bun test",
 		"test:e2e": "find . -name '*.spec-e2e.ts' -not -path './node_modules/*' | xargs bun test",
+		"test:all": "bun run --parallel test test:e2e",
 		"check": "biome check --write --unsafe",
 		"check-types": "tsc --noEmit",
 		"up": "docker compose up -d",

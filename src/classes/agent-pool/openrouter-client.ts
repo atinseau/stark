@@ -6,7 +6,7 @@ import type {
 	ChatOptions,
 	OpenRouterConfig,
 	OpenRouterMessage,
-} from "./types.ts";
+} from "../../types/agent-pool.types.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -293,6 +293,10 @@ export class OpenRouterClient {
 				return { role: "user" as const, content: msg.content };
 			case "assistant":
 				return { role: "assistant" as const, content: msg.content };
+			default: {
+				const _exhaustive: never = msg.role;
+				throw new Error(`Unknown message role: ${_exhaustive}`);
+			}
 		}
 	}
 

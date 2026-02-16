@@ -169,6 +169,7 @@ export class Agent extends EventEmitter {
 			...(typeof tracingConfig === "string" ? { endpoint: tracingConfig } : {}),
 			serviceName: "stark-agent",
 			tracerName: "stark-agent",
+			parentSpanContext: this.config.parentSpanContext,
 		});
 
 		// Start the root session span immediately so traceId is available

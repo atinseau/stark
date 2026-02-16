@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
 import { AgentEvent } from "../../../enums/agent-event.enum.ts";
+import type { ContextDelta, SubTask } from "../../../types/agent-pool.types.ts";
 import { ContextTracker } from "../context-tracker.ts";
-import type { ContextDelta, SubTask } from "../types.ts";
 
 // ════════════════════════════════════════════════════════════════════════════
 // Concurrency Tests
