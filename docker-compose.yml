@@ -37,6 +37,29 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── MkDocs — Documentation site ────────────────────────────────────────
+  #
+  # Serves the /docs folder as a live-reloading documentation site.
+  # Open http://localhost:${DOCS_PORT:-8083} in your browser.
+  #
+  docs:
+    image: squidfunk/mkdocs-material:latest
+    container_name: stark-docs
+    restart: unless-stopped
+    ports:
+      - "${DOCS_PORT:-8083}:8000"
+    volumes:
+      - ./docs:/docs/docs
+      - ./mkdocs.yml:/docs/mkdocs.yml
+    working_dir: /docs
+    command: serve --dev-addr=0.0.0.0:8000 --watch-theme
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
 volumes:
   seq-data:
     driver: local

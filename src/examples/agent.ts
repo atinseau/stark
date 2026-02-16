@@ -14,9 +14,9 @@
  *   bun run src/index.ts
  */
 
-import { Agent } from "./classes/agent/agent.ts";
-import { AgentEvent } from "./enums/agent-event.enum.ts";
-import { ansi, renderBar, separator } from "./utils/formatting.ts";
+import { Agent } from "../classes/agent/agent.ts";
+import { AgentEvent } from "../enums/agent-event.enum.ts";
+import { ansi, renderBar, separator } from "../utils/formatting.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 

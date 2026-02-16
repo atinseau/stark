@@ -38,6 +38,7 @@
 				"**/*.test.tsx",
 				"**/*.spec.ts",
 				"**/*.spec.tsx",
+				"**/*.spec-e2e.ts",
 				"**/tests/**/*.ts"
 			],
 			"linter": {

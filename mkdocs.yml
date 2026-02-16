@@ -1,0 +1,117 @@
+site_name: Stark — Agent System Documentation
+site_description: Documentation technique du système d'agents Stark basé sur l'Agent Client Protocol (ACP)
+site_author: Stark Team
+repo_name: stark
+
+theme:
+  name: material
+  language: fr
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Mode clair
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Mode sombre
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/robot-outline
+
+nav:
+  - Accueil: index.md
+  - Architecture:
+      - Vue d'ensemble: architecture/overview.md
+      - Flux & Séquences: architecture/sequences.md
+  - Briques du système:
+      - Agent Client Protocol (ACP): components/acp.md
+      - Agent: components/agent.md
+      - Tracer (OpenTelemetry): components/tracer.md
+      - Logger (Pino): components/logger.md
+      - TerminalManager: components/terminal-manager.md
+      - AgentContextManager: components/context-manager.md
+      - SessionUpdateHandler: components/session-update-handler.md
+      - ACPClientFactory: components/acp-client-factory.md
+      - AgentPool: components/agent-pool.md
+  - Concepts:
+      - Événements typés: concepts/events.md
+      - Cycle de vie: concepts/lifecycle.md
+  - Guide:
+      - Démarrage rapide: guide/quickstart.md
+      - Configuration: guide/configuration.md
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search:
+      lang: fr
+  - minify:
+      minify_html: true
+
+extra:
+  social: []
+  generator: false
+
+extra_css:
+  - stylesheets/extra.css
