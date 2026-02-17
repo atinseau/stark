@@ -1,13 +1,16 @@
 import type pino from "pino";
 import { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import type { DeltaType } from "../../enums/delta-type.enum.ts";
 import { batchedSharingDecisionPrompt } from "../../prompts/index.ts";
 import type {
   AgentContextState,
   ContextDelta,
   SharingDecision,
+  SharingRecord,
   TaskDependency,
 } from "../../types/agent-pool.types.ts";
 import { toErrorMessage } from "../../utils/errors.ts";
+import { isoNow } from "../../utils/formatting.ts";
 import type { ContextTracker } from "./context-tracker.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
@@ -19,6 +22,20 @@ import type { ConversationManager } from "./conversation-manager.ts";
  * Candidates beyond this limit are evaluated in additional batched calls.
  */
 const MAX_AGENT_EVALUATION_BUFFER_SIZE = 5;
+
+/**
+ * Nombre maximum d'enregistrements de partage conservés par agent cible.
+ * Limite la croissance mémoire en ne gardant que les partages les plus récents.
+ * Les plus anciens sont considérés comme suffisamment intégrés par l'agent.
+ */
+const MAX_SHARING_RECORDS_PER_TARGET = 20;
+
+/**
+ * Nombre maximum d'enregistrements inclus dans le prompt LLM pour le contexte.
+ * Réduit la consommation de tokens tout en donnant au LLM assez de contexte
+ * pour éviter les doublons.
+ */
+const MAX_SHARING_RECORDS_IN_PROMPT = 5;
 
 // ── Validators ─────────────────────────────────────────────────────────────
 
@@ -189,6 +206,17 @@ export class InformationBroker {
   /** Running count of positive sharing decisions. */
   private _shareCount = 0;
 
+  /**
+   * Historique des partages effectués, indexé par agent cible.
+   *
+   * Structure : targetAgentId → SharingRecord[]
+   *
+   * L'indexation par target est choisie car la question de déduplication
+   * est toujours posée du point de vue du target : « cet agent a-t-il
+   * déjà reçu cette information ? »
+   */
+  private readonly sharingHistory = new Map<string, SharingRecord[]>();
+
   constructor(
     private readonly conversations: ConversationManager,
     private readonly contextTracker: ContextTracker,
@@ -282,6 +310,75 @@ export class InformationBroker {
   /** Total number of positive sharing decisions. */
   get shareCount(): number {
     return this._shareCount;
+  }
+
+  /** Nombre total de partages enregistrés dans l'historique. */
+  get totalRecordedSharings(): number {
+    let count = 0;
+    for (const records of this.sharingHistory.values()) {
+      count += records.length;
+    }
+    return count;
+  }
+
+  /**
+   * Enregistre un partage effectué pour la déduplication future.
+   *
+   * Appelé après qu'un partage a été approuvé ET injecté dans l'agent cible.
+   * Tronque l'information à un résumé court pour limiter l'usage mémoire
+   * et la taille des prompts futurs.
+   *
+   * @param decision - La décision de partage qui a été exécutée.
+   * @param deltaType - Le type de delta qui a déclenché le partage.
+   */
+  recordSharing(decision: SharingDecision, deltaType: DeltaType): void {
+    const record: SharingRecord = {
+      timestamp: isoNow(),
+      sourceAgentId: decision.sourceAgentId,
+      targetAgentId: decision.targetAgentId,
+      deltaType,
+      informationSummary: decision.information.slice(0, 200),
+    };
+
+    let records = this.sharingHistory.get(decision.targetAgentId);
+    if (!records) {
+      records = [];
+      this.sharingHistory.set(decision.targetAgentId, records);
+    }
+    records.push(record);
+
+    // Enforce limit — supprimer les plus anciens
+    if (records.length > MAX_SHARING_RECORDS_PER_TARGET) {
+      records.splice(0, records.length - MAX_SHARING_RECORDS_PER_TARGET);
+    }
+  }
+
+  /**
+   * Retourne les partages récents effectués vers un agent cible.
+   * Utilisé pour enrichir le prompt de décision de partage et permettre
+   * au LLM d'éviter les doublons.
+   *
+   * @param targetAgentId - L'agent cible.
+   * @param limit - Nombre maximum de records à retourner (défaut: MAX_SHARING_RECORDS_IN_PROMPT).
+   * @returns Les records les plus récents, du plus ancien au plus récent.
+   */
+  getRecentSharingsForTarget(
+    targetAgentId: string,
+    limit: number = MAX_SHARING_RECORDS_IN_PROMPT,
+  ): readonly SharingRecord[] {
+    const records = this.sharingHistory.get(targetAgentId);
+    if (!records || records.length === 0) return [];
+
+    // Retourner les N plus récents
+    return records.slice(-limit);
+  }
+
+  /**
+   * Efface tout l'historique de partage.
+   * Appelé en fin d'exécution lors du cleanup.
+   */
+  clearHistory(): void {
+    this.sharingHistory.clear();
   }
 
   // ── Private ──────────────────────────────────────────────────────
@@ -405,6 +502,9 @@ export class InformationBroker {
         targetState.agentId,
       );
 
+      // Récupérer l'historique de partage pour ce target (déduplication)
+      const previouslyShared = this.getRecentSharingsForTarget(targetState.agentId);
+
       return {
         agentId: targetState.agentId,
         agentName: targetState.agentName,
@@ -413,6 +513,7 @@ export class InformationBroker {
         status: targetState.status,
         completed: targetState.completed,
         dependency: dependency ?? null,
+        previouslyShared,
       };
     });
 

@@ -1248,6 +1248,9 @@ export class AgentPool extends EventEmitter {
               try {
                 targetEntry.agent.injectContext(decision.information);
 
+                // Record the sharing for deduplication in future evaluations
+                this.informationBroker?.recordSharing(decision, delta.type);
+
                 this.emitPoolEvent(PoolEvent.CONTEXT_SHARED, {
                   sourceAgentId: decision.sourceAgentId,
                   targetAgentId: decision.targetAgentId,

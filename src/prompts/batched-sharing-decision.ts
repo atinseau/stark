@@ -24,6 +24,12 @@ const BATCHED_SHARING_DECISION_SOURCE = `Determine if information from one agent
 {{#if this.dependency}}
 - **Dependency**: {{this.dependency.from}} → {{this.dependency.to}} ({{this.dependency.type}})
 {{/if}}
+{{#if this.previouslyShared.length}}
+- **Previously shared to this agent** (do NOT re-share redundant information):
+{{#each this.previouslyShared}}
+  - [{{this.deltaType}}] {{this.informationSummary}}
+{{/each}}
+{{/if}}
 
 {{/each}}
 
@@ -32,6 +38,7 @@ const BATCHED_SHARING_DECISION_SOURCE = `Determine if information from one agent
 2. Would it help the target produce better output?
 3. Is the target in a state where it can use this (not completed/destroyed)?
 4. Is the information concrete and actionable?
+5. Has similar or identical information already been shared to this target? If yes, do NOT re-share — only share genuinely NEW information that adds value beyond what was previously communicated.
 
 ## JSON Output
 Return one decision per target agent:
@@ -42,6 +49,6 @@ Return one decision per target agent:
 }`;
 
 export const batchedSharingDecisionPrompt = Handlebars.compile(
-	BATCHED_SHARING_DECISION_SOURCE,
-	{ noEscape: true },
+  BATCHED_SHARING_DECISION_SOURCE,
+  { noEscape: true },
 );
