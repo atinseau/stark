@@ -27,6 +27,15 @@ Analyze tasks and choose the optimal execution strategy:
 3. Dependencies must be logically sound (no circular deps).
 4. Respond with valid JSON only — no markdown, no commentary.
 
+## Project Context Usage
+When project context is provided:
+1. Use the existing file structure to inform your decomposition — do NOT create subtasks for work that's already done.
+2. Reference specific existing files/directories in subtask prompts so agents know where to work.
+3. Match the project's language, framework, and conventions in subtask descriptions.
+4. If the project is empty, include setup instructions in the first subtask.
+5. If the project uses specific tools (e.g., biome for linting, jest for tests), mention them in relevant subtasks.
+6. Each subtask prompt should reference the project context so the agent knows what exists.
+
 ## JSON Schema
 {
   "strategy": "single" | "multi",
@@ -73,6 +82,33 @@ const TASK_ANALYSIS_SOURCE = `Analyze this task and determine the optimal execut
 {{#each constraints}}
 - {{this}}
 {{/each}}
+{{/if}}
+
+{{#if projectContext}}
+## Project Context
+{{#if projectContext.isEmpty}}
+This is a NEW/EMPTY project — no existing source files.
+Working directory: {{projectContext.cwd}}
+{{else}}
+**Working directory**: {{projectContext.cwd}}
+**Languages**: {{#each projectContext.languages}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+{{#if projectContext.detectedFrameworks.length}}
+**Frameworks**: {{#each projectContext.detectedFrameworks}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+{{/if}}
+
+### File Structure
+\`\`\`
+{{#each projectContext.fileTree}}
+{{this}}
+{{/each}}
+\`\`\`
+
+{{#each projectContext.configFiles}}
+### {{@key}}
+{{this}}
+
+{{/each}}
+{{/if}}
 {{/if}}
 
 Only use "multi" if decomposition provides genuine, meaningful benefit. Single agent is often better. Respond with the JSON analysis object.`;

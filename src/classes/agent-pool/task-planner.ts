@@ -7,6 +7,7 @@ import {
 	taskAnalysisPrompt,
 } from "../../prompts/index.ts";
 import type {
+	ProjectContext,
 	SubTask,
 	TaskAnalysis,
 	TaskDependency,
@@ -333,12 +334,14 @@ export class TaskPlanner {
 	 * @param task        - The user's task description.
 	 * @param contextHints - Optional additional context for the planner.
 	 * @param constraints  - Optional constraints to apply.
+	 * @param projectContext - Optional project context from the ProjectScanner.
 	 * @returns A validated {@link TaskAnalysis} with the chosen strategy.
 	 */
 	async analyze(
 		task: string,
 		contextHints?: string,
 		constraints?: string[],
+		projectContext?: ProjectContext,
 	): Promise<TaskAnalysis> {
 		// Reset planner conversation to prevent history accumulation
 		// across sequential executions. Each planning call starts fresh,
@@ -354,6 +357,7 @@ export class TaskPlanner {
 			task: sanitizedTask,
 			contextHints: contextHints ?? null,
 			constraints: constraints ?? null,
+			projectContext: projectContext ?? null,
 		});
 
 		this.logger.info(

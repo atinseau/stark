@@ -49,6 +49,6 @@ Return one decision per target agent:
 }`;
 
 export const batchedSharingDecisionPrompt = Handlebars.compile(
-  BATCHED_SHARING_DECISION_SOURCE,
-  { noEscape: true },
+	BATCHED_SHARING_DECISION_SOURCE,
+	{ noEscape: true },
 );
