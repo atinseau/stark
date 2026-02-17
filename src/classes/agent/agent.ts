@@ -14,6 +14,7 @@ import type {
 	AgentSnapshot,
 	PromptResult,
 } from "../../types/agent.types.ts";
+import type { StructuredContextInjection } from "../../types/agent-pool.types.ts";
 import type { AgentEventMap } from "../../types/events.types.ts";
 import { toError } from "../../utils/errors.ts";
 import { isoNow, truncate } from "../../utils/formatting.ts";
@@ -346,6 +347,9 @@ export class Agent extends EventEmitter {
 	/**
 	 * Injects new instructions into the agent's context.
 	 *
+	 * Accepts either a raw string (backward compatible) or a
+	 * StructuredContextInjection (for prioritized, categorized injections).
+	 *
 	 * Behavior depends on the agent's current state:
 	 *
 	 *   - **IDLE**: The instructions are immediately sent as a follow-up
@@ -359,37 +363,70 @@ export class Agent extends EventEmitter {
 	 * This design preserves the ACP session's conversation history, so
 	 * injected instructions build upon all previous context.
 	 *
-	 * @param instructions - The new instructions to inject.
+	 * @param instructions - The instructions to inject (string or structured).
 	 *
 	 * @example
 	 * ```ts
-	 * // Steer the agent while it's idle
+	 * // Legacy mode — backward compatible
 	 * agent.injectContext("From now on, use TypeScript strict mode");
 	 *
-	 * // Queue instructions while a prompt is running
-	 * agent.prompt("Build the API"); // fire-and-forget
-	 * agent.injectContext("Also add input validation"); // queued
+	 * // Structured mode — prioritized and categorized
+	 * agent.injectContext({
+	 *   content: "The API uses port 3000",
+	 *   priority: ContextInjectionPriority.CRITICAL,
+	 *   category: ContextInjectionCategory.DEPENDENCY_OUTPUT,
+	 *   source: "api-developer",
+	 *   dependencyType: "blocking",
+	 *   timestamp: new Date().toISOString(),
+	 * });
 	 * ```
 	 */
-	injectContext(instructions: string): void {
+	injectContext(instructions: string | StructuredContextInjection): void {
 		if (this._status === AgentStatus.DESTROYED) {
 			throw new Error(`Agent "${this.name}" (${this.id}) has been destroyed`);
 		}
 
 		const queued = this._status === AgentStatus.BUSY;
 
-		this.logger.info(
-			{ queued },
-			`Context injected: ${truncate(instructions, 100)}`,
-		);
+		if (typeof instructions === "string") {
+			// Legacy mode — backward compatible
+			this.logger.info(
+				{ queued },
+				`Context injected (legacy): ${truncate(instructions, 100)}`,
+			);
 
-		this.emitTyped(AgentEvent.CONTEXT_INJECTED, {
-			instructions,
-			queued,
-		});
+			this.emitTyped(AgentEvent.CONTEXT_INJECTED, {
+				instructions,
+				queued,
+			});
 
-		// Push onto the pure-logic context queue
-		this.contextManager.inject(instructions);
+			this.contextManager.inject(instructions);
+		} else {
+			// Structured mode — prioritized and categorized
+			this.logger.info(
+				{
+					queued,
+					priority: instructions.priority,
+					category: instructions.category,
+					source: instructions.source,
+				},
+				`Context injected (structured, ${instructions.priority}): ${truncate(instructions.content, 100)}`,
+			);
+
+			this.emitTyped(AgentEvent.CONTEXT_INJECTED, {
+				instructions: instructions.content,
+				queued,
+			});
+
+			const { dropped } = this.contextManager.injectStructured(instructions);
+
+			if (dropped > 0) {
+				this.logger.warn(
+					{ dropped, pendingCount: this.contextManager.pendingCount },
+					`Overflow: ${dropped} low-priority injection(s) dropped from queue`,
+				);
+			}
+		}
 
 		if (!queued) {
 			// Agent is idle — send immediately as a follow-up prompt

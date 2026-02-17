@@ -14,6 +14,7 @@ import type {
 import type {
 	AgentPoolConfig,
 	PoolManagedAgent,
+	StructuredContextInjection,
 	TaskAnalysis,
 } from "../../../types/agent-pool.types.ts";
 import type { AgentPool } from "../agent-pool.ts";
@@ -107,12 +108,16 @@ export function createMockAgent(
 
 			return promptResult;
 		},
-		injectContext: (_instructions: string) => {
+		injectContext: (_instructions: string | StructuredContextInjection) => {
+			const content =
+				typeof _instructions === "string"
+					? _instructions
+					: _instructions.content;
 			emitter.emit(AgentEvent.CONTEXT_INJECTED, {
 				event: AgentEvent.CONTEXT_INJECTED,
 				timestamp: new Date().toISOString(),
 				agent: identity,
-				instructions: _instructions,
+				instructions: content,
 				queued: status === AgentStatus.BUSY,
 			});
 		},

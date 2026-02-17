@@ -694,6 +694,28 @@ export class InformationBroker {
 	 *
 	 * @returns The matching dependency, or `undefined` if none exists.
 	 */
+	/**
+	 * Finds a dependency between two subtask IDs.
+	 * Public method for use by the pool orchestrator when building
+	 * structured injections.
+	 *
+	 * @param fromSubtaskId - The source subtask ID.
+	 * @param toSubtaskId - The target subtask ID.
+	 * @returns The dependency, or null if none exists.
+	 */
+	findDependencyBySubtaskIds(
+		fromSubtaskId: string,
+		toSubtaskId: string,
+	): TaskDependency | null {
+		return (
+			this.dependencies.find(
+				(dep) =>
+					(dep.from === fromSubtaskId && dep.to === toSubtaskId) ||
+					(dep.from === toSubtaskId && dep.to === fromSubtaskId),
+			) ?? null
+		);
+	}
+
 	private findDependency(
 		sourceAgentId: string,
 		targetAgentId: string,

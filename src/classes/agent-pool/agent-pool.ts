@@ -36,8 +36,13 @@ import type {
 	PoolManagedAgent,
 	ProjectContext,
 	SharingDecision,
+	StructuredContextInjection,
 	SubTask,
 	TaskAnalysis,
+} from "../../types/agent-pool.types.ts";
+import {
+	ContextInjectionCategory,
+	ContextInjectionPriority,
 } from "../../types/agent-pool.types.ts";
 import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
@@ -657,12 +662,20 @@ export class AgentPool extends EventEmitter {
 					return "No active agents to inject context into.";
 				}
 
-				// Inject into all active agents
+				// Inject into all active agents as structured context
 				let injectedCount = 0;
 				for (const { agent } of this.managedAgents.values()) {
 					if (agent.status !== AgentStatus.DESTROYED) {
 						try {
-							agent.injectContext(instructions);
+							const injection: StructuredContextInjection = {
+								content: instructions,
+								priority: ContextInjectionPriority.HIGH,
+								category: ContextInjectionCategory.USER_INSTRUCTION,
+								source: "user",
+								dependencyType: null,
+								timestamp: isoNow(),
+							};
+							agent.injectContext(injection);
 							injectedCount++;
 						} catch {
 							// Agent may have been destroyed between the check and the call
@@ -1329,18 +1342,69 @@ export class AgentPool extends EventEmitter {
 							targetEntry.agent.status !== AgentStatus.DESTROYED
 						) {
 							try {
-								targetEntry.agent.injectContext(decision.information);
+								// Determine the dependency type between source and target
+								const sourceSubtaskId = this.agentToSubtask.get(
+									decision.sourceAgentId,
+								);
+								const targetSubtaskId = this.agentToSubtask.get(
+									decision.targetAgentId,
+								);
+
+								let depType: "blocking" | "informational" | null = null;
+								if (
+									sourceSubtaskId &&
+									targetSubtaskId &&
+									this.informationBroker
+								) {
+									const dep = this.informationBroker.findDependencyBySubtaskIds(
+										sourceSubtaskId,
+										targetSubtaskId,
+									);
+									depType = dep?.type ?? null;
+								}
+
+								// Determine priority based on dependency type and delta significance
+								let priority: ContextInjectionPriority;
+								if (depType === "blocking") {
+									priority = ContextInjectionPriority.CRITICAL;
+								} else if (depType === "informational") {
+									priority = ContextInjectionPriority.HIGH;
+								} else if (delta.significance >= 0.8) {
+									priority = ContextInjectionPriority.HIGH;
+								} else {
+									priority = ContextInjectionPriority.NORMAL;
+								}
+
+								// Determine category
+								const category = depType
+									? ContextInjectionCategory.DEPENDENCY_OUTPUT
+									: ContextInjectionCategory.SHARED_CONTEXT;
+
+								// Get source agent name
+								const sourceEntry = this.managedAgents.get(
+									decision.sourceAgentId,
+								);
+								const sourceName =
+									sourceEntry?.agent.name ?? decision.sourceAgentId;
+
+								// Inject as structured context
+								const injection: StructuredContextInjection = {
+									content: decision.information,
+									priority,
+									category,
+									source: sourceName,
+									dependencyType: depType,
+									timestamp: isoNow(),
+								};
+
+								targetEntry.agent.injectContext(injection);
 
 								// Record the sharing for deduplication in future evaluations
 								this.informationBroker?.recordSharing(decision, delta.type);
 
 								// Track sharing event for execution summary
-								const sourceEntry = this.managedAgents.get(
-									decision.sourceAgentId,
-								);
 								this._sharingSummaries.push({
-									sourceAgentName:
-										sourceEntry?.agent.name ?? decision.sourceAgentId,
+									sourceAgentName: sourceName,
 									targetAgentName: targetEntry.agent.name,
 									informationPreview: decision.information.slice(0, 150),
 								});
@@ -1356,8 +1420,10 @@ export class AgentPool extends EventEmitter {
 										sourceAgentId: decision.sourceAgentId,
 										targetAgentId: decision.targetAgentId,
 										informationLength: decision.information.length,
+										priority,
+										category,
 									},
-									"Context shared between agents",
+									"Context shared between agents (structured)",
 								);
 							} catch (injectError) {
 								this.logger.warn(

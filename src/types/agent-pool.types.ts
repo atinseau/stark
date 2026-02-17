@@ -167,6 +167,86 @@ export interface TaskDependency {
 	readonly type: "blocking" | "informational";
 }
 
+// ── Structured Context Injection Types ─────────────────────────────────────
+
+/**
+ * Priority levels for context injections.
+ *
+ * Determines the order in which injections are presented to the agent
+ * when multiple are pending. Higher priority = presented first.
+ */
+export enum ContextInjectionPriority {
+	/** Critical information the agent cannot proceed correctly without.
+	 *  Typically from blocking dependencies. */
+	CRITICAL = "critical",
+
+	/** Important information that significantly improves the agent's output.
+	 *  Typically from informational dependencies or significant sharing decisions. */
+	HIGH = "high",
+
+	/** Supplementary context that may be useful but is not essential.
+	 *  Typically from non-dependent agents or routine observations. */
+	NORMAL = "normal",
+
+	/** Background information provided for awareness only.
+	 *  Will be dropped first if the queue is overloaded. */
+	LOW = "low",
+}
+
+/**
+ * Categories of context injections.
+ * Used to format clear headers in the injected prompt.
+ */
+export enum ContextInjectionCategory {
+	/** Output from a dependent agent that this agent needs. */
+	DEPENDENCY_OUTPUT = "dependency_output",
+
+	/** Information shared from another agent working on a related task. */
+	SHARED_CONTEXT = "shared_context",
+
+	/** Additional instructions or constraints from the user. */
+	USER_INSTRUCTION = "user_instruction",
+
+	/** Error or conflict information from the coordination system. */
+	COORDINATION_ALERT = "coordination_alert",
+}
+
+/**
+ * A categorized, prioritized instruction injected into an agent's context.
+ *
+ * Unlike raw string injections, structured injections carry metadata
+ * that allows the AgentContextManager to:
+ * - Present them in priority order (CRITICAL first)
+ * - Format them with clear source attribution
+ * - Limit accumulation per priority level
+ * - Drop low-priority injections when the queue is overloaded
+ */
+export interface StructuredContextInjection {
+	/** The raw instruction text to inject. */
+	readonly content: string;
+
+	/** Priority level for ordering and overflow management. */
+	readonly priority: ContextInjectionPriority;
+
+	/**
+	 * Category describing the nature of this injection.
+	 * Used for formatting the injection header in the agent's prompt.
+	 */
+	readonly category: ContextInjectionCategory;
+
+	/** Human-readable source label (e.g., "api-developer", "user"). */
+	readonly source: string;
+
+	/**
+	 * Optional dependency type if this injection comes from a dependency.
+	 * `null` for user-injected context or non-dependency sharing.
+	 */
+	readonly dependencyType: "blocking" | "informational" | null;
+
+	/** ISO-8601 timestamp when the injection was created. */
+	readonly timestamp: string;
+}
+
 // ── Context Tracking Types ─────────────────────────────────────────────────
 
 /**
@@ -632,7 +712,7 @@ export interface PoolManagedAgent {
 	readonly ready: Promise<void>;
 
 	prompt(text: string): Promise<PromptResult>;
-	injectContext(instructions: string): void;
+	injectContext(instructions: string | StructuredContextInjection): void;
 	snapshot(): {
 		identity: AgentIdentity;
 		status: AgentStatus;
