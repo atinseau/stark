@@ -6,6 +6,5 @@ export { ExecutionStrategy } from "./execution-strategy.enum.ts";
 export { PoolEvent } from "./pool-event.enum.ts";
 export { ReactionAction } from "./reaction-action.enum.ts";
 export { SessionUpdateType } from "./session-update-type.enum.ts";
-export { SpanName } from "./span-name.enum.ts";
 export { TaskComplexity } from "./task-complexity.enum.ts";
 export { UserIntent } from "./user-intent.enum.ts";

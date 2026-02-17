@@ -66,8 +66,6 @@ export async function main(): Promise<void> {
 		// The agents themselves use their own model via ACP
 		model: "anthropic/claude-opus-4.6",
 
-		tracing: true,
-
 		// Log output config — applies to the pool AND all spawned agents
 		logOutput: {
 			console: true,
@@ -77,7 +75,7 @@ export async function main(): Promise<void> {
 		logLevel: "info",
 
 		// Working directory for all spawned agents
-		cwd: join(process.cwd(), "agent-workspace"),
+		cwd: join(process.cwd()),
 
 		// Agent-specific configuration (no need to repeat logOutput/logLevel/cwd)
 		agentConfig: {

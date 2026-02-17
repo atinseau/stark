@@ -411,7 +411,7 @@ export interface AgentPoolConfig {
 	 * automatically to every agent created by the pool.
 	 *
 	 * - `console: false` → no console output from the pool or its agents
-	 * - `seq: false`     → no logs **or traces** are sent to Seq
+	 * - `seq: false`     → no logs are sent to Seq
 	 *
 	 * Individual agents inherit this setting unless explicitly overridden
 	 * via `agentConfig.logOutput`.
@@ -496,40 +496,6 @@ export interface AgentPoolConfig {
 	 * that conforms to the agent interface used by the pool.
 	 */
 	readonly createAgent?: AgentFactory;
-
-	/**
-	 * Enable OpenTelemetry tracing for the pool and all spawned agents.
-	 *
-	 * When enabled, the pool creates a root trace that encompasses the
-	 * entire execution lifecycle. All agents spawned by the pool
-	 * automatically inherit the pool's trace context, creating a
-	 * unified trace hierarchy:
-	 *
-	 *   pool.execution (AgentPool root span)
-	 *   ├── pool.planning
-	 *   ├── pool.agent.spawn (per agent)
-	 *   │   └── agent.session (Agent root — linked via parentSpanContext)
-	 *   │       ├── agent.prompt
-	 *   │       │   ├── agent.tool_call
-	 *   │       │   └── …
-	 *   │       └── …
-	 *   ├── pool.execute-subtasks
-	 *   │   └── pool.subtask.execute (per subtask)
-	 *   ├── pool.summary
-	 *   └── pool.cleanup
-	 *
-	 * - `true`   → traces are sent to the default endpoint derived from
-	 *               `SEQ_URL` (`http://localhost:5341/ingest/otlp/v1/traces`)
-	 * - `string` → traces are sent to the provided OTLP endpoint URL
-	 * - `false`  → tracing is disabled (default)
-	 *
-	 * When this is set, it also propagates to spawned agents so that
-	 * agent traces are linked under the pool's root span.
-	 *
-	 * **Note:** When `logOutput.seq` is explicitly `false`, tracing is
-	 * disabled regardless of this setting — no data is sent to Seq.
-	 */
-	readonly tracing?: boolean | string;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────

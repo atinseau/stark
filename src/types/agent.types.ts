@@ -1,5 +1,4 @@
 import type { McpServer, StopReason, Usage } from "@agentclientprotocol/sdk";
-import type { SpanContext } from "@opentelemetry/api";
 import type pino from "pino";
 
 // ── Per-Transport Level Config ─────────────────────────────────────────────
@@ -122,44 +121,10 @@ export interface AgentConfig {
 	logLevel?: pino.Level;
 
 	/**
-	 * Enable OpenTelemetry tracing to Seq (or any OTLP-compatible backend).
-	 *
-	 * - `true`   → traces are sent to the default endpoint derived from `SEQ_URL`
-	 *               (`http://localhost:5341/ingest/otlp/v1/traces`)
-	 * - `string` → traces are sent to the provided OTLP endpoint URL
-	 * - `false`  → tracing is disabled (default)
-	 *
-	 * Requires a running Seq instance (see `docker-compose.yml`).
-	 */
-	tracing?: boolean | string;
-
-	/**
 	 * When `true`, all permission requests are automatically approved
 	 * by selecting the first "allow" option. Defaults to `true`.
 	 */
 	autoApprove?: boolean;
-
-	/**
-	 * Optional parent span context for cross-tracer linking.
-	 *
-	 * When provided, the Agent's tracer will create its root span as a
-	 * child of this span context. This is used by the AgentPool to link
-	 * all agent traces under the pool's execution trace, creating a
-	 * unified trace hierarchy:
-	 *
-	 *   pool.execution (AgentPool root)
-	 *   ├── pool.agent.spawn (per agent)
-	 *   │   └── agent.session (Agent root — linked via parentSpanContext)
-	 *   │       ├── agent.prompt
-	 *   │       │   ├── agent.tool_call
-	 *   │       │   └── …
-	 *   │       └── …
-	 *   └── …
-	 *
-	 * The span context is typically obtained from the parent tracer via
-	 * `Tracer.getRootSpanContext()` or `Tracer.getActiveSpanContext()`.
-	 */
-	parentSpanContext?: SpanContext;
 }
 
 // ── Prompt Result ──────────────────────────────────────────────────────────

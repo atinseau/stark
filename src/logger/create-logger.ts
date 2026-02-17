@@ -2,7 +2,6 @@ import pino from "pino";
 import pretty from "pino-pretty";
 import { createStream as createSeqStream } from "pino-seq";
 import type { AgentIdentity, LogOutputConfig } from "../types/agent.types.ts";
-import type { LogTraceProvider } from "../types/observability.types.ts";
 
 // ── Internal Helpers ───────────────────────────────────────────────────────
 
@@ -121,13 +120,6 @@ function resolveSeq(
  * });
  * ```
  *
- * ### Trace Context Correlation
- *
- * When `traceContextProvider` is supplied, every log line dynamically carries
- * the `TraceId` and `SpanId` of the **currently active** span (via pino's
- * `mixin` option). This allows Seq to correlate logs with the correct span,
- * even as the active span changes across prompts and tool calls.
- *
  * @param identity - The agent's identity, used to tag every log line.
  * @param config   - Which outputs to enable and at what log level.
  * @returns A configured `pino.Logger` instance.
@@ -141,36 +133,12 @@ function resolveSeq(
  *
  * logger.info({ toolCallId: "tc-1" }, "Tool call started");
  * ```
- *
- * @example
- * ```ts
- * // With dynamic trace context:
- * const logger = createLogger(
- *   { id: "abc-123", name: "Swift Nova" },
- *   {
- *     logOutput: { console: true, seq: true },
- *     logLevel: "info",
- *     traceContextProvider: () => tracer.getTraceContext(),
- *   }
- * );
- * // Every log line now carries the TraceId/SpanId of the active span.
- * ```
  */
 export function createLogger(
 	identity: AgentIdentity,
 	config?: {
 		logOutput?: LogOutputConfig;
 		logLevel?: pino.Level;
-		/**
-		 * Dynamic trace context provider.
-		 *
-		 * Called on every log write via pino's `mixin` option. Returns the
-		 * `TraceId` and `SpanId` of the currently active span so that Seq
-		 * can correlate each log line with the correct span.
-		 *
-		 * Ensures logs are correlated with the correct span at all times.
-		 */
-		traceContextProvider?: LogTraceProvider;
 	},
 ): pino.Logger {
 	const globalLevel = config?.logLevel ?? "info";
@@ -247,25 +215,6 @@ export function createLogger(
 		agentName: identity.name,
 	};
 
-	// ── Dynamic trace context via mixin ────────────────────────────────
-	// When a traceContextProvider is supplied, pino calls our mixin on
-	// every log write to inject the current TraceId/SpanId. This ensures
-	// logs are correlated with the *active* span, not just the root session.
-	const traceProvider = config?.traceContextProvider;
-	const mixin = traceProvider
-		? (): Record<string, string> => {
-				const ctx = traceProvider();
-				if (ctx) {
-					return {
-						TraceId: ctx.TraceId,
-						SpanId: ctx.SpanId,
-						...(ctx.ParentSpanId && { ParentSpanId: ctx.ParentSpanId }),
-					};
-				}
-				return {};
-			}
-		: undefined;
-
 	// The global level must be the lowest of all transport levels so that
 	// pino doesn't filter out messages before they reach a transport that
 	// wants them. Each transport's own `level` acts as a secondary filter.
@@ -280,7 +229,6 @@ export function createLogger(
 		{
 			level: lowestLevel,
 			base,
-			...(mixin && { mixin }),
 		},
 		multistream,
 	);

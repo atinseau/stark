@@ -1,8 +1,7 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import pino from "pino";
 import { AgentEvent } from "../../../enums/agent-event.enum.ts";
 import type { EmitEventFn } from "../../../types/observability.types.ts";
-import type { Tracer } from "../../tracer/tracer.ts";
 import { AgentSessionUpdateHandler } from "../agent-session-update-handler.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -10,79 +9,6 @@ import { AgentSessionUpdateHandler } from "../agent-session-update-handler.ts";
 /** Creates a silent pino logger for testing. */
 function silentLogger(): pino.Logger {
 	return pino({ level: "silent" });
-}
-
-/**
- * Creates a minimal no-op Tracer mock.
- *
- * Exposes the new simplified API (`wrap`, `startTracked`, `endTracked`,
- * `getTrackedSpan`, `recordEvent`, `recordRootEvent`) that the session
- * update handler and its tracing helpers use.
- */
-function noopTracer(): Tracer {
-	/** Backing store for tracked spans so helpers can retrieve them. */
-	const tracked = new Map<string, { span: any; label: string }>();
-
-	/** A minimal mock span that satisfies the Span interface. */
-	const mockSpan = () => ({
-		setAttribute: mock(() => {}),
-		setAttributes: mock(() => {}),
-		addEvent: mock(() => {}),
-		setStatus: mock(() => {}),
-		end: mock(() => {}),
-		isRecording: () => true,
-		recordException: mock(() => {}),
-		spanContext: () => ({
-			traceId: "0".repeat(32),
-			spanId: "0".repeat(16),
-			traceFlags: 0,
-		}),
-		updateName: mock(() => {}),
-		addLink: mock(() => {}),
-		addLinks: mock(() => {}),
-	});
-
-	return {
-		enabled: false,
-		startRootSpan: mock(() => mockSpan()),
-		endRootSpan: mock(() => {}),
-		getRootSpanContext: mock(() => undefined),
-		getContext: mock(() => undefined),
-		currentSpan: mock(() => undefined),
-		wrap: mock(async (_name: string, fnOrAttrs: any, maybeFn?: any) => {
-			const fn = typeof fnOrAttrs === "function" ? fnOrAttrs : maybeFn;
-			return fn(mockSpan());
-		}),
-		wrapSync: mock((_name: string, fnOrAttrs: any, maybeFn?: any) => {
-			const fn = typeof fnOrAttrs === "function" ? fnOrAttrs : maybeFn;
-			return fn(mockSpan());
-		}),
-		startTracked: mock(
-			(
-				id: string,
-				_name: string,
-				_attrs?: any,
-				label: string = "operation",
-			) => {
-				const span = mockSpan();
-				tracked.set(id, { span, label });
-				return span;
-			},
-		),
-		endTracked: mock((id: string) => {
-			const entry = tracked.get(id);
-			tracked.delete(id);
-			return entry?.span;
-		}),
-		getTrackedSpan: mock((id: string) => tracked.get(id)?.span),
-		activateTracked: mock(() => {}),
-		deactivateTracked: mock(() => {}),
-		recordEvent: mock(() => {}),
-		recordRootEvent: mock(() => {}),
-		forceExport: mock(async () => {}),
-		flush: mock(async () => {}),
-		shutdown: mock(async () => {}),
-	} as unknown as Tracer;
 }
 
 /**
@@ -114,7 +40,6 @@ describe("AgentSessionUpdateHandler — Initial State", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -130,7 +55,6 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -152,7 +76,6 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -171,7 +94,6 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -193,7 +115,6 @@ describe("AgentSessionUpdateHandler — agent_message_chunk", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -216,7 +137,6 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -235,7 +155,6 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -252,7 +171,6 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -273,14 +191,13 @@ describe("AgentSessionUpdateHandler — user_message_chunk", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
 
 		handler.handle({
 			sessionUpdate: "user_message_chunk",
-			content: { type: "text", text: "echo" },
+			content: { type: "text", text: "Hello agent" },
 		} as any);
 
 		expect(events.size).toBe(0);
@@ -290,7 +207,6 @@ describe("AgentSessionUpdateHandler — user_message_chunk", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -311,7 +227,6 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -334,32 +249,10 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 		expect(starts[0].command).toBe("bun test");
 	});
 
-	it("starts a tracer tool call span", () => {
-		const { emitEvent } = createEventCollector();
-		const tracer = noopTracer();
-		const handler = new AgentSessionUpdateHandler(
-			silentLogger(),
-			tracer,
-			emitEvent,
-			"test-agent",
-		);
-
-		handler.handle({
-			sessionUpdate: "tool_call",
-			toolCallId: "tc-2",
-			title: "Edit file",
-			kind: "edit",
-			rawInput: null,
-		} as any);
-
-		expect(tracer.startTracked).toHaveBeenCalledTimes(1);
-	});
-
 	it("handles tool_call with no kind or locations", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -385,7 +278,6 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -417,7 +309,6 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -450,7 +341,6 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -478,65 +368,10 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 		expect(failures[0].title).toBe("Run lint");
 	});
 
-	it("ends tracer tool call span on completion", () => {
-		const { emitEvent } = createEventCollector();
-		const tracer = noopTracer();
-		const handler = new AgentSessionUpdateHandler(
-			silentLogger(),
-			tracer,
-			emitEvent,
-			"test-agent",
-		);
-
-		handler.handle({
-			sessionUpdate: "tool_call",
-			toolCallId: "tc-13",
-			title: "Something",
-			rawInput: null,
-		} as any);
-
-		handler.handle({
-			sessionUpdate: "tool_call_update",
-			toolCallId: "tc-13",
-			status: "completed",
-			rawOutput: null,
-		} as any);
-
-		expect(tracer.endTracked).toHaveBeenCalledTimes(1);
-	});
-
-	it("updates tracer tool call span on in-progress", () => {
-		const { emitEvent } = createEventCollector();
-		const tracer = noopTracer();
-		const handler = new AgentSessionUpdateHandler(
-			silentLogger(),
-			tracer,
-			emitEvent,
-			"test-agent",
-		);
-
-		handler.handle({
-			sessionUpdate: "tool_call",
-			toolCallId: "tc-14",
-			title: "Something",
-			rawInput: null,
-		} as any);
-
-		handler.handle({
-			sessionUpdate: "tool_call_update",
-			toolCallId: "tc-14",
-			status: "in_progress",
-			rawOutput: { content: "Working..." },
-		} as any);
-
-		expect(tracer.getTrackedSpan).toHaveBeenCalledTimes(1);
-	});
-
 	it("uses toolCallId as fallback title for unknown tool calls", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -558,7 +393,6 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -591,7 +425,6 @@ describe("AgentSessionUpdateHandler — plan", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -620,7 +453,6 @@ describe("AgentSessionUpdateHandler — current_mode_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -643,7 +475,6 @@ describe("AgentSessionUpdateHandler — config_option_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -668,7 +499,6 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -692,7 +522,6 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -711,7 +540,6 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -725,30 +553,6 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		const usage = getEvents(events, AgentEvent.USAGE_UPDATE);
 		expect(usage[0].contextPercent).toBe(33);
 	});
-
-	it("records usage in the tracer", () => {
-		const { emitEvent } = createEventCollector();
-		const tracer = noopTracer();
-		const handler = new AgentSessionUpdateHandler(
-			silentLogger(),
-			tracer,
-			emitEvent,
-			"test-agent",
-		);
-
-		handler.handle({
-			sessionUpdate: "usage_update",
-			used: 7500,
-			size: 10000,
-		} as any);
-
-		expect(tracer.recordEvent).toHaveBeenCalledTimes(1);
-		expect(tracer.recordEvent).toHaveBeenCalledWith("usage.update", {
-			"usage.context_used": 7500,
-			"usage.context_size": 10000,
-			"usage.context_percent": 75,
-		});
-	});
 });
 
 // ── AgentSessionUpdateHandler — session_info_update ─────────────────────────────
@@ -758,7 +562,6 @@ describe("AgentSessionUpdateHandler — session_info_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -779,7 +582,6 @@ describe("AgentSessionUpdateHandler — available_commands_update", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -800,7 +602,6 @@ describe("AgentSessionUpdateHandler — unknown update types", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -817,7 +618,6 @@ describe("AgentSessionUpdateHandler — unknown update types", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -837,7 +637,6 @@ describe("AgentSessionUpdateHandler — Multiple Updates Sequence", () => {
 		const { emitEvent, events } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);
@@ -900,7 +699,6 @@ describe("AgentSessionUpdateHandler — Multiple Updates Sequence", () => {
 		const { emitEvent } = createEventCollector();
 		const handler = new AgentSessionUpdateHandler(
 			silentLogger(),
-			noopTracer(),
 			emitEvent,
 			"test-agent",
 		);

@@ -23,14 +23,12 @@ import type {
 import type pino from "pino";
 
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
-import { SpanName } from "../../enums/span-name.enum.ts";
 import type {
 	AgentEventMap,
 	BaseAgentEvent,
 } from "../../types/events.types.ts";
 import type { EmitEventFn } from "../../types/observability.types.ts";
 import type { TerminalManager } from "../terminal-manager/terminal-manager.ts";
-import type { Tracer } from "../tracer/tracer.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -82,7 +80,6 @@ export interface AgentAcpClientFactoryConfig {
  *
  * The factory receives its dependencies via the constructor:
  *   - **logger** — for structured logging of each operation
- *   - **tracer** — for OpenTelemetry span management (using `wrap()` and tracked spans)
  *   - **emitEvent** — for typed event emission
  *   - **terminalManager** — for terminal lifecycle management
  *   - **config** — for permission auto-approve behavior
@@ -92,13 +89,11 @@ export interface AgentAcpClientFactoryConfig {
  * Handlers use the private `logAndEmit` helper to combine logging and
  * event emission into a single call, eliminating the repeated
  * `logger.info(…) + emitEvent(…)` two-liner that previously appeared
- * in every handler. Tracing is handled via `tracer.wrap()` for scoped
- * spans (permissions, FS ops) and `tracer.startTracked()` for long-lived
- * spans (terminals).
+ * in every handler.
  *
  * @example
  * ```ts
- * const factory = new AgentAcpClientFactory(logger, tracer, emitEvent, terminalManager, config);
+ * const factory = new AgentAcpClientFactory(logger, emitEvent, terminalManager, config, agentName);
  * const client = factory.build(onSessionUpdate);
  * const connection = new acp.ClientSideConnection((_agent) => client, stream);
  * ```
@@ -106,11 +101,10 @@ export interface AgentAcpClientFactoryConfig {
 export class AgentAcpClientFactory {
 	constructor(
 		private readonly logger: pino.Logger,
-		private readonly tracer: Tracer,
 		private readonly emitEvent: EmitEventFn,
 		private readonly terminalManager: TerminalManager,
 		private readonly config: AgentAcpClientFactoryConfig,
-		private readonly agentName: string,
+		readonly _agentName: string,
 	) {}
 
 	/**
@@ -194,44 +188,6 @@ export class AgentAcpClientFactory {
 		};
 	}
 
-	// ── Private Tracing Helpers ────────────────────────────────────────────
-
-	/**
-	 * Formats a span name with the agent name suffix.
-	 */
-	private spanName(name: SpanName): string {
-		return `${name}:${this.agentName}`;
-	}
-
-	/**
-	 * Starts an `agent.terminal` span as a tracked span.
-	 *
-	 * The span is activated for log correlation during creation, then
-	 * deactivated (via the caller) since terminals run in the background.
-	 * Args are stored as a native string array (OTel supports `string[]` natively).
-	 */
-	private traceTerminalStart(
-		terminalId: string,
-		command: string,
-		args?: string[],
-		cwd?: string,
-	): void {
-		const span = this.tracer.startTracked(
-			terminalId,
-			this.spanName(SpanName.AGENT_TERMINAL),
-			{
-				"terminal.id": terminalId,
-				"terminal.command": command,
-				...(cwd && { "terminal.cwd": cwd }),
-			},
-			"terminal",
-		);
-
-		if (args && args.length > 0) {
-			span.setAttribute("terminal.args", args);
-		}
-	}
-
 	// ── Private Helpers ────────────────────────────────────────────────────
 
 	/**
@@ -261,128 +217,103 @@ export class AgentAcpClientFactory {
 	): Promise<RequestPermissionResponse> {
 		const toolCallTitle = params.toolCall.title ?? params.toolCall.toolCallId;
 
-		return this.tracer.wrap(
-			this.spanName(SpanName.AGENT_PERMISSION),
+		this.logAndEmit(
+			AgentEvent.PERMISSION_REQUESTED,
 			{
-				"permission.tool_call_id": params.toolCall.toolCallId,
-				...(toolCallTitle && {
-					"permission.tool_call_title": toolCallTitle,
-				}),
+				toolCallId: params.toolCall.toolCallId,
+				toolCallTitle,
+				options: params.options,
 			},
-			async (permSpan) => {
+			`Permission needed: ${toolCallTitle}`,
+		);
+
+		// Find the first "allow" option — needed for both auto and manual approval
+		const allowOption = params.options.find(
+			(o: PermissionOption) =>
+				o.kind === "allow_always" || o.kind === "allow_once",
+		);
+
+		// ── Auto-approve path ──────────────────────────────────────────
+		if (this.config.autoApprove) {
+			if (allowOption) {
 				this.logAndEmit(
-					AgentEvent.PERMISSION_REQUESTED,
+					AgentEvent.PERMISSION_GRANTED,
 					{
 						toolCallId: params.toolCall.toolCallId,
-						toolCallTitle,
-						options: params.options,
+						optionId: allowOption.optionId,
+						optionName: allowOption.name,
 					},
-					`Permission needed: ${toolCallTitle}`,
+					`Permission granted (auto): ${allowOption.name}`,
 				);
 
-				// Find the first "allow" option — needed for both auto and manual approval
-				const allowOption = params.options.find(
-					(o: PermissionOption) =>
-						o.kind === "allow_always" || o.kind === "allow_once",
-				);
+				return {
+					outcome: {
+						outcome: "selected" as const,
+						optionId: allowOption.optionId,
+					},
+				};
+			}
 
-				// ── Auto-approve path ──────────────────────────────────────────
-				if (this.config.autoApprove) {
-					if (allowOption) {
-						this.logAndEmit(
-							AgentEvent.PERMISSION_GRANTED,
-							{
-								toolCallId: params.toolCall.toolCallId,
-								optionId: allowOption.optionId,
-								optionName: allowOption.name,
-							},
-							`Permission granted (auto): ${allowOption.name}`,
-						);
+			// Auto-approve enabled but no allow option exists
+			const reason = "No allow option available";
+			this.logger.warn(
+				{ toolCallId: params.toolCall.toolCallId },
+				`Permission denied: ${reason}`,
+			);
+			this.emitEvent(AgentEvent.PERMISSION_DENIED, {
+				toolCallId: params.toolCall.toolCallId,
+				reason,
+			});
 
-						permSpan.setAttribute("permission.outcome", "granted");
-						permSpan.setAttribute("permission.option_id", allowOption.optionId);
-						permSpan.setAttribute("permission.option_name", allowOption.name);
+			return { outcome: { outcome: "cancelled" as const } };
+		}
 
-						return {
-							outcome: {
-								outcome: "selected" as const,
-								optionId: allowOption.optionId,
-							},
-						};
-					}
+		// ── Manual approval path (autoApprove === false) ───────────────
+		if (allowOption && this.config.onApproveRequest) {
+			const approved = await this.config.onApproveRequest({
+				toolCallId: params.toolCall.toolCallId,
+				toolCallTitle,
+				options: params.options,
+			});
 
-					// Auto-approve enabled but no allow option exists
-					const reason = "No allow option available";
-					this.logger.warn(
-						{ toolCallId: params.toolCall.toolCallId },
-						`Permission denied: ${reason}`,
-					);
-					this.emitEvent(AgentEvent.PERMISSION_DENIED, {
+			if (approved) {
+				this.logAndEmit(
+					AgentEvent.PERMISSION_GRANTED,
+					{
 						toolCallId: params.toolCall.toolCallId,
-						reason,
-					});
-
-					permSpan.setAttribute("permission.outcome", "denied");
-					permSpan.setAttribute("permission.denial_reason", reason);
-
-					return { outcome: { outcome: "cancelled" as const } };
-				}
-
-				// ── Manual approval path (autoApprove === false) ───────────────
-				if (allowOption && this.config.onApproveRequest) {
-					const approved = await this.config.onApproveRequest({
-						toolCallId: params.toolCall.toolCallId,
-						toolCallTitle,
-						options: params.options,
-					});
-
-					if (approved) {
-						this.logAndEmit(
-							AgentEvent.PERMISSION_GRANTED,
-							{
-								toolCallId: params.toolCall.toolCallId,
-								optionId: allowOption.optionId,
-								optionName: allowOption.name,
-							},
-							`Permission manually approved: ${allowOption.name}`,
-						);
-
-						permSpan.setAttribute("permission.outcome", "granted");
-						permSpan.setAttribute("permission.option_id", allowOption.optionId);
-						permSpan.setAttribute("permission.option_name", allowOption.name);
-
-						return {
-							outcome: {
-								outcome: "selected" as const,
-								optionId: allowOption.optionId,
-							},
-						};
-					}
-				}
-
-				// No approval callback, no allow option, or user denied
-				const denialReason = !allowOption
-					? "No allow option available"
-					: !this.config.onApproveRequest
-						? "Auto-approve disabled and no approval handler registered"
-						: "User denied permission";
-
-				this.logger.warn(
-					{ toolCallId: params.toolCall.toolCallId },
-					`Permission denied: ${denialReason}`,
+						optionId: allowOption.optionId,
+						optionName: allowOption.name,
+					},
+					`Permission manually approved: ${allowOption.name}`,
 				);
 
-				this.emitEvent(AgentEvent.PERMISSION_DENIED, {
-					toolCallId: params.toolCall.toolCallId,
-					reason: denialReason,
-				});
+				return {
+					outcome: {
+						outcome: "selected" as const,
+						optionId: allowOption.optionId,
+					},
+				};
+			}
+		}
 
-				permSpan.setAttribute("permission.outcome", "denied");
-				permSpan.setAttribute("permission.denial_reason", denialReason);
+		// No approval callback, no allow option, or user denied
+		const denialReason = !allowOption
+			? "No allow option available"
+			: !this.config.onApproveRequest
+				? "Auto-approve disabled and no approval handler registered"
+				: "User denied permission";
 
-				return { outcome: { outcome: "cancelled" as const } };
-			},
+		this.logger.warn(
+			{ toolCallId: params.toolCall.toolCallId },
+			`Permission denied: ${denialReason}`,
 		);
+
+		this.emitEvent(AgentEvent.PERMISSION_DENIED, {
+			toolCallId: params.toolCall.toolCallId,
+			reason: denialReason,
+		});
+
+		return { outcome: { outcome: "cancelled" as const } };
 	}
 
 	private async handleWriteTextFile(
@@ -394,25 +325,14 @@ export class AgentAcpClientFactory {
 			`FS write: ${params.path}`,
 		);
 
-		return this.tracer.wrap(
-			this.spanName(SpanName.AGENT_FS_WRITE),
-			{
-				"fs.path": params.path,
-				"fs.operation": "write",
-				"fs.content_length": params.content.length,
-			},
-			async (span) => {
-				const { writeFile, mkdir } = await import("node:fs/promises");
-				const { dirname } = await import("node:path");
+		const { writeFile, mkdir } = await import("node:fs/promises");
+		const { dirname } = await import("node:path");
 
-				await mkdir(dirname(params.path), { recursive: true });
-				await writeFile(params.path, params.content, "utf-8");
+		await mkdir(dirname(params.path), { recursive: true });
+		await writeFile(params.path, params.content, "utf-8");
 
-				span.setAttribute("fs.content_length", params.content.length);
-				this.logger.debug({ path: params.path }, "FS write complete");
-				return {};
-			},
-		);
+		this.logger.debug({ path: params.path }, "FS write complete");
+		return {};
 	}
 
 	private async handleReadTextFile(
@@ -420,43 +340,22 @@ export class AgentAcpClientFactory {
 	): Promise<ReadTextFileResponse> {
 		this.logger.info({ path: params.path }, `FS read: ${params.path}`);
 
-		return this.tracer.wrap(
-			this.spanName(SpanName.AGENT_FS_READ),
-			{
-				"fs.path": params.path,
-				"fs.operation": "read",
-			},
-			async (span) => {
-				const { readFile } = await import("node:fs/promises");
-				const content = await readFile(params.path, "utf-8");
+		const { readFile } = await import("node:fs/promises");
+		const content = await readFile(params.path, "utf-8");
 
-				span.setAttribute("fs.content_length", content.length);
-
-				this.logAndEmit(
-					AgentEvent.FS_READ,
-					{ path: params.path, contentLength: content.length },
-					"FS read complete",
-				);
-
-				return { content };
-			},
+		this.logAndEmit(
+			AgentEvent.FS_READ,
+			{ path: params.path, contentLength: content.length },
+			"FS read complete",
 		);
+
+		return { content };
 	}
 
 	private async handleCreateTerminal(
 		params: CreateTerminalRequest,
 	): Promise<CreateTerminalResponse> {
 		const terminal = this.terminalManager.create(params);
-
-		// Start a tracked terminal span. It's activated for log correlation
-		// during creation, then deactivated since the terminal runs in the
-		// background. The span stays tracked until the terminal exits.
-		this.traceTerminalStart(
-			terminal.terminalId,
-			terminal.command,
-			terminal.args,
-			terminal.cwd,
-		);
 
 		this.logAndEmit(
 			AgentEvent.TERMINAL_CREATED,
@@ -468,11 +367,6 @@ export class AgentAcpClientFactory {
 			},
 			`Terminal created: ${terminal.command}`,
 		);
-
-		// Deactivate the terminal span from the context stack after creation
-		// logging. The span stays tracked (open) until the terminal exits,
-		// but subsequent logs should not inherit the terminal's SpanId.
-		this.tracer.deactivateTracked(terminal.terminalId);
 
 		return { terminalId: terminal.terminalId };
 	}

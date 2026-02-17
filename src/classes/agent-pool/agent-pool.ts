@@ -8,7 +8,7 @@ import { AgentStatus } from "../../enums/agent-status.enum.ts";
 import { ConversationRole } from "../../enums/conversation-role.enum.ts";
 import { ExecutionStrategy } from "../../enums/execution-strategy.enum.ts";
 import { PoolEvent } from "../../enums/pool-event.enum.ts";
-import { SpanName } from "../../enums/span-name.enum.ts";
+
 import { UserIntent } from "../../enums/user-intent.enum.ts";
 import { createLogger } from "../../logger/create-logger.ts";
 import {
@@ -38,7 +38,7 @@ import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import { generateIdentity } from "../../utils/identity.ts";
 import { Agent } from "../agent/agent.ts";
-import { Tracer } from "../tracer/tracer.ts";
+
 import {
 	ApprovalManager,
 	type ApprovalResolution,
@@ -127,29 +127,6 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
  *   the `@openrouter/sdk`. The model is configurable but the provider is
  *   not interchangeable.
  *
- * ## Distributed Tracing
- *
- * When `tracing` is enabled in the pool config, the AgentPool creates a
- * root trace that encompasses the entire execution lifecycle. All agents
- * spawned by the pool automatically inherit the pool's trace context via
- * `parentSpanContext`, creating a unified trace hierarchy visible in Seq
- * (or any OTLP-compatible backend):
- *
- *   pool.execution (AgentPool root span)
- *   ├── pool.planning
- *   ├── pool.spawn-agents
- *   │   └── pool.agent.spawn (per agent)
- *   │       └── agent.session (Agent root — linked via parentSpanContext)
- *   │           ├── agent.prompt
- *   │           │   ├── agent.tool_call
- *   │           │   └── …
- *   │           └── …
- *   ├── pool.execute-subtasks
- *   │   └── pool.subtask.execute (per subtask)
- *   ├── pool.summary
- *   ├── pool.cleanup
- *   └── pool.send / pool.intent-analysis / …
- *
  * ## Architecture Constraints
  *
  * - The `Agent` class is **never modified**. AgentPool wraps it.
@@ -173,7 +150,6 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
  *   logLevel: "info",
  *   cwd: "/my/project",
  *   agentConfig: { autoApprove: true },
- *   tracing: true, // enable distributed tracing
  * });
  *
  * // Execute a task — the pool decides the strategy
@@ -191,7 +167,7 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
 export class AgentPool extends EventEmitter {
 	// ── Identity ───────────────────────────────────────────────────────
 
-	/** Pool identity for logging and tracing. */
+	/** Pool identity for logging. */
 	private readonly identity = generateIdentity({ name: "AgentPool" });
 
 	// ── Configuration ──────────────────────────────────────────────────
@@ -224,9 +200,6 @@ export class AgentPool extends EventEmitter {
 
 	/** Pending approval request manager (active when autoApprove is false). */
 	private readonly approvalManager: ApprovalManager;
-
-	/** OpenTelemetry tracer for distributed tracing. */
-	private readonly tracer: Tracer;
 
 	// ── Runtime State ──────────────────────────────────────────────────
 
@@ -298,34 +271,10 @@ export class AgentPool extends EventEmitter {
 		};
 		const poolLogLevel = config.logLevel ?? "info";
 
-		// Create tracer (no-op when tracing is disabled) — must be created
-		// BEFORE the logger so we can inject trace context into log bindings.
-		// When logOutput.seq is explicitly false, tracing is disabled
-		// regardless of config.tracing — nothing should be sent to Seq.
-		const tracingConfig = this.config.tracing;
-		const seqDisabled = config.logOutput?.seq === false;
-		this.tracer = new Tracer({
-			enabled: !!tracingConfig && !seqDisabled,
-			...(typeof tracingConfig === "string" ? { endpoint: tracingConfig } : {}),
-			serviceName: "stark-agent-pool",
-			tracerName: "stark-agent-pool",
-		});
-
-		// Start the root span immediately so traceId is available for the logger.
-		// This root span lives for the entire lifetime of the pool.
-		this.tracer.startRootSpan(SpanName.POOL_LIFECYCLE, {
-			"pool.id": this.identity.id,
-			"pool.name": this.identity.name,
-			"pool.model": this.config.model,
-			"pool.max_agents": this.config.maxAgents,
-		});
-
-		// Logger — with dynamic trace context correlation
-		// Uses pool-level logOutput/logLevel (not agentConfig).
+		// Logger — uses pool-level logOutput/logLevel (not agentConfig).
 		this.logger = createLogger(this.identity, {
 			logOutput: poolLogOutput,
 			logLevel: poolLogLevel,
-			traceContextProvider: () => this.tracer.getContext(),
 		});
 
 		// Multi-conversation LLM manager
@@ -417,178 +366,99 @@ export class AgentPool extends EventEmitter {
 		this.emitPoolEvent(PoolEvent.TASK_RECEIVED, { task });
 
 		try {
-			const result = await this.tracer.wrap(
-				SpanName.POOL_EXECUTION,
+			// ── Phase 1: Planning ────────────────────────────────────────
+			this.emitPoolEvent(PoolEvent.PLANNING_START, { task });
+			this.logger.info({ taskLength: task.length }, "Phase 1: Planning");
+
+			const analysis = await this.planner.analyze(task);
+
+			this._currentAnalysis = analysis;
+			this._currentStrategy = analysis.strategy;
+
+			this.emitPoolEvent(PoolEvent.PLANNING_COMPLETE, { analysis });
+
+			this.logger.info(
 				{
-					"pool.task": task.slice(0, 500),
-					"pool.task_length": task.length,
+					strategy: analysis.strategy,
+					subtaskCount: analysis.subtasks.length,
+					complexity: analysis.complexity,
 				},
-				async (executionSpan) => {
-					// ── Phase 1: Planning ────────────────────────────────────────
-					this.emitPoolEvent(PoolEvent.PLANNING_START, { task });
-					this.logger.info({ taskLength: task.length }, "Phase 1: Planning");
-
-					const analysis = await this.tracer.wrap(
-						SpanName.POOL_PLANNING,
-						async (span) => {
-							const result = await this.planner.analyze(task);
-							span.setAttribute("pool.planning.strategy", result.strategy);
-							span.setAttribute(
-								"pool.planning.subtask_count",
-								result.subtasks.length,
-							);
-							span.setAttribute("pool.planning.complexity", result.complexity);
-							return result;
-						},
-					);
-
-					this._currentAnalysis = analysis;
-					this._currentStrategy = analysis.strategy;
-
-					this.emitPoolEvent(PoolEvent.PLANNING_COMPLETE, { analysis });
-
-					this.logger.info(
-						{
-							strategy: analysis.strategy,
-							subtaskCount: analysis.subtasks.length,
-							complexity: analysis.complexity,
-						},
-						`Planning complete: ${analysis.strategy} strategy, ${analysis.subtasks.length} subtask(s)`,
-					);
-
-					// ── Phase 2: Spawn Agents ────────────────────────────────────
-					this.logger.info("Phase 2: Spawning agents");
-
-					const agents = await this.tracer.wrap(
-						SpanName.POOL_SPAWN_AGENTS,
-						async (span) => {
-							this.logger.info(
-								{ subtaskCount: analysis.subtasks.length },
-								`Spawning ${analysis.subtasks.length} agent(s)`,
-							);
-							const result = await this.spawnAgents(analysis);
-							span.setAttribute("pool.spawn.agent_count", result.size);
-							this.logger.info(
-								{ agentCount: result.size },
-								`All ${result.size} agent(s) spawned`,
-							);
-							return result;
-						},
-					);
-
-					// ── Phase 3: Execute Subtasks ────────────────────────────────
-					this.logger.info("Phase 3: Executing subtasks");
-
-					// Create the information broker for this execution
-					this.informationBroker = new InformationBroker(
-						this.conversations,
-						this.contextTracker,
-						analysis.dependencies,
-						this.logger,
-					);
-
-					const executionResults = await this.tracer.wrap(
-						SpanName.POOL_EXECUTE_SUBTASKS,
-						async (span) => {
-							this.logger.info(
-								{ subtaskCount: analysis.subtasks.length },
-								`Executing ${analysis.subtasks.length} subtask(s)`,
-							);
-							const results = await this.executeSubtasks(analysis, agents);
-							span.setAttribute("pool.execute.result_count", results.length);
-							span.setAttribute(
-								"pool.execute.success_count",
-								results.filter((r) => r.success).length,
-							);
-							span.setAttribute(
-								"pool.execute.failure_count",
-								results.filter((r) => !r.success).length,
-							);
-							this.logger.info(
-								{
-									resultCount: results.length,
-									successCount: results.filter((r) => r.success).length,
-									failureCount: results.filter((r) => !r.success).length,
-								},
-								`All subtasks finished`,
-							);
-							return results;
-						},
-					);
-
-					// ── Phase 4 & 5: Summary + Cleanup (parallel) ────────────────
-					this.logger.info("Phase 4+5: Summary & Cleanup (parallel)");
-
-					const [summary] = await Promise.all([
-						this.tracer.wrap(SpanName.POOL_SUMMARY, async (_span) => {
-							return this.generateSummary(task, analysis, executionResults);
-						}),
-						this.tracer.wrap(SpanName.POOL_CLEANUP, async (_span) => {
-							await this.destroyManagedAgents();
-						}),
-					]);
-
-					const durationMs = Date.now() - startTime;
-
-					const poolResult: AgentPoolResult = {
-						task,
-						strategy: analysis.strategy,
-						analysis,
-						agents: executionResults,
-						summary,
-						durationMs,
-					};
-
-					this.emitPoolEvent(PoolEvent.EXECUTION_COMPLETE, {
-						result: poolResult,
-					});
-
-					this.logger.info(
-						{
-							strategy: analysis.strategy,
-							agentCount: executionResults.length,
-							durationMs,
-							deltaCount: this._deltaCount,
-							sharingDecisions: this._sharingDecisionCount,
-						},
-						`Execution complete in ${durationMs}ms`,
-					);
-
-					// Set execution span attributes before it auto-closes
-					if (executionSpan.isRecording()) {
-						executionSpan.setAttribute(
-							"pool.execution.strategy",
-							analysis.strategy,
-						);
-						executionSpan.setAttribute(
-							"pool.execution.agent_count",
-							executionResults.length,
-						);
-						executionSpan.setAttribute(
-							"pool.execution.duration_ms",
-							durationMs,
-						);
-						executionSpan.setAttribute(
-							"pool.execution.delta_count",
-							this._deltaCount,
-						);
-						executionSpan.setAttribute(
-							"pool.execution.sharing_decisions",
-							this._sharingDecisionCount,
-						);
-					}
-
-					return poolResult;
-				},
+				`Planning complete: ${analysis.strategy} strategy, ${analysis.subtasks.length} subtask(s)`,
 			);
 
-			// Export pool-level spans to Seq so that all OTLP spans
-			// are delivered before the caller continues.
-			// Uses forceExport() (non-destructive) instead of flush() so the
-			// pool's root span and tracer state remain alive for future use.
-			await this.tracer.forceExport();
+			// ── Phase 2: Spawn Agents ────────────────────────────────────
+			this.logger.info("Phase 2: Spawning agents");
 
-			return result;
+			this.logger.info(
+				{ subtaskCount: analysis.subtasks.length },
+				`Spawning ${analysis.subtasks.length} agent(s)`,
+			);
+			const agents = await this.spawnAgents(analysis);
+			this.logger.info(
+				{ agentCount: agents.size },
+				`All ${agents.size} agent(s) spawned`,
+			);
+
+			// ── Phase 3: Execute Subtasks ────────────────────────────────
+			this.logger.info("Phase 3: Executing subtasks");
+
+			// Create the information broker for this execution
+			this.informationBroker = new InformationBroker(
+				this.conversations,
+				this.contextTracker,
+				analysis.dependencies,
+				this.logger,
+			);
+
+			this.logger.info(
+				{ subtaskCount: analysis.subtasks.length },
+				`Executing ${analysis.subtasks.length} subtask(s)`,
+			);
+			const executionResults = await this.executeSubtasks(analysis, agents);
+			this.logger.info(
+				{
+					resultCount: executionResults.length,
+					successCount: executionResults.filter((r) => r.success).length,
+					failureCount: executionResults.filter((r) => !r.success).length,
+				},
+				`All subtasks finished`,
+			);
+
+			// ── Phase 4 & 5: Summary + Cleanup (parallel) ────────────────
+			this.logger.info("Phase 4+5: Summary & Cleanup (parallel)");
+
+			const [summary] = await Promise.all([
+				this.generateSummary(task, analysis, executionResults),
+				this.destroyManagedAgents(),
+			]);
+
+			const durationMs = Date.now() - startTime;
+
+			const poolResult: AgentPoolResult = {
+				task,
+				strategy: analysis.strategy,
+				analysis,
+				agents: executionResults,
+				summary,
+				durationMs,
+			};
+
+			this.emitPoolEvent(PoolEvent.EXECUTION_COMPLETE, {
+				result: poolResult,
+			});
+
+			this.logger.info(
+				{
+					strategy: analysis.strategy,
+					agentCount: executionResults.length,
+					durationMs,
+					deltaCount: this._deltaCount,
+					sharingDecisions: this._sharingDecisionCount,
+				},
+				`Execution complete in ${durationMs}ms`,
+			);
+
+			return poolResult;
 		} catch (error) {
 			const errorMessage = toErrorMessage(error);
 
@@ -646,18 +516,7 @@ export class AgentPool extends EventEmitter {
 		);
 
 		// Analyze intent
-		const intent = await this.tracer.wrap(
-			SpanName.POOL_INTENT_ANALYSIS,
-			{
-				"pool.send.message_length": message.length,
-			},
-			async (span) => {
-				const result = await this.analyzeIntent(message);
-				span.setAttribute("pool.intent.type", result.intent);
-				span.setAttribute("pool.intent.confidence", result.confidence);
-				return result;
-			},
-		);
+		const intent = await this.analyzeIntent(message);
 
 		this.logger.info(
 			{
@@ -743,11 +602,6 @@ export class AgentPool extends EventEmitter {
 					}
 				}
 
-				this.tracer.recordRootEvent("pool.context_injected", {
-					"pool.inject.agent_count": injectedCount,
-					"pool.inject.instructions_length": instructions.length,
-				});
-
 				return `Context injected into ${injectedCount} active agent(s).`;
 			}
 
@@ -755,8 +609,6 @@ export class AgentPool extends EventEmitter {
 				if (!this._executing) {
 					return "No task is currently executing.";
 				}
-
-				this.tracer.recordRootEvent("pool.execution_cancelled");
 
 				await this.destroyManagedAgents();
 				return "Current execution cancelled. All agents destroyed.";
@@ -839,11 +691,6 @@ export class AgentPool extends EventEmitter {
 		this.emitPoolEvent(PoolEvent.DESTROYED, {});
 
 		this.logger.info("AgentPool destroyed");
-
-		// ── Tracing: flush all spans and shut down after the last log ────
-		// Placed at the very end so that all logs above retain their
-		// TraceId/SpanId via the pino mixin (shutdown nulls rootSpan).
-		await this.tracer.shutdown();
 	}
 
 	// ── Typed EventEmitter Overrides ───────────────────────────────────
@@ -884,10 +731,6 @@ export class AgentPool extends EventEmitter {
 	 * Enforces the `maxAgents` configuration limit. Each agent is
 	 * registered with the context tracker and wired to emit pool events.
 	 *
-	 * When tracing is enabled, each agent receives the pool's current
-	 * span context as its `parentSpanContext`, linking the agent's
-	 * entire trace tree under the pool's spawn span.
-	 *
 	 * @param analysis - The task analysis with subtasks to spawn agents for.
 	 * @returns A map of subtask ID → managed agent entry.
 	 */
@@ -920,106 +763,78 @@ export class AgentPool extends EventEmitter {
 
 		// Spawn all agents in parallel
 		const spawnPromises = subtasksToSpawn.map(async (subtask) => {
-			await this.tracer.wrap(
-				SpanName.POOL_AGENT_SPAWN,
+			// Build the agent config, forwarding pool-level logOutput,
+			// logLevel, and cwd as defaults. agentConfig can override them.
+			const agentConfig: AgentConfig = {
+				// Pool-level defaults
+				logOutput: this.config.logOutput,
+				logLevel: this.config.logLevel,
+				cwd: this.config.cwd,
+				// Agent-specific overrides
+				...this.config.agentConfig,
+				// Always set the subtask role as agent name
+				name: subtask.role,
+			};
+
+			const agent = this.agentFactory(agentConfig);
+
+			// Register with context tracker
+			this.contextTracker.registerAgent(agent.id, agent.name, subtask);
+
+			// Map subtask ↔ agent IDs
+			this.subtaskToAgent.set(subtask.id, agent.id);
+			this.agentToSubtask.set(agent.id, subtask.id);
+
+			// Wire agent events to pool delta tracking
+			this.wireAgentEvents(agent, subtask);
+
+			// Store in managed agents
+			const entry = {
+				agent,
+				subtask,
+				result: null as AgentExecutionResult | null,
+			};
+			this.managedAgents.set(agent.id, entry);
+			agents.set(subtask.id, { agent, subtask });
+
+			this.emitPoolEvent(PoolEvent.AGENT_SPAWNED, {
+				agentId: agent.id,
+				agentName: agent.name,
+				subtask,
+			});
+
+			this.logger.info(
 				{
-					"pool.agent.subtask_id": subtask.id,
-					"pool.agent.role": subtask.role,
+					agentId: agent.id,
+					agentName: agent.name,
+					subtaskId: subtask.id,
+					role: subtask.role,
 				},
-				async (spawnSpan) => {
-					// Resolve the parent span context for the agent's tracer.
-					// With AsyncLocalStorage, spawnSpan is automatically the
-					// current span in this context, so its spanContext is correct.
-					const parentSpanContext = spawnSpan.isRecording()
-						? spawnSpan.spanContext()
-						: this.tracer.getRootSpanContext();
-
-					// Build the agent config, forwarding pool-level logOutput,
-					// logLevel, and cwd as defaults. agentConfig can override them.
-					const agentConfig: AgentConfig = {
-						// Pool-level defaults
-						logOutput: this.config.logOutput,
-						logLevel: this.config.logLevel,
-						cwd: this.config.cwd,
-						// Agent-specific overrides
-						...this.config.agentConfig,
-						// Always set the subtask role as agent name
-						name: subtask.role,
-						// Propagate tracing to agents so they are always linked
-						...(this.config.tracing
-							? {
-									tracing: this.config.tracing,
-									parentSpanContext,
-								}
-							: {}),
-					};
-
-					const agent = this.agentFactory(agentConfig);
-
-					// Register with context tracker
-					this.contextTracker.registerAgent(agent.id, agent.name, subtask);
-
-					// Map subtask ↔ agent IDs
-					this.subtaskToAgent.set(subtask.id, agent.id);
-					this.agentToSubtask.set(agent.id, subtask.id);
-
-					// Wire agent events to pool delta tracking
-					this.wireAgentEvents(agent, subtask);
-
-					// Store in managed agents
-					const entry = {
-						agent,
-						subtask,
-						result: null as AgentExecutionResult | null,
-					};
-					this.managedAgents.set(agent.id, entry);
-					agents.set(subtask.id, { agent, subtask });
-
-					this.emitPoolEvent(PoolEvent.AGENT_SPAWNED, {
-						agentId: agent.id,
-						agentName: agent.name,
-						subtask,
-					});
-
-					this.logger.info(
-						{
-							agentId: agent.id,
-							agentName: agent.name,
-							subtaskId: subtask.id,
-							role: subtask.role,
-						},
-						`Agent spawned: ${agent.name} for ${subtask.role}`,
-					);
-
-					// Wait for agent to be ready
-					try {
-						await agent.ready;
-
-						if (spawnSpan.isRecording()) {
-							spawnSpan.setAttribute("pool.agent.id", agent.id);
-							spawnSpan.setAttribute("pool.agent.name", agent.name);
-						}
-					} catch (error) {
-						const errorMessage = toErrorMessage(error);
-
-						this.logger.error(
-							{
-								agentId: agent.id,
-								error: errorMessage,
-							},
-							`Agent failed to initialize: ${errorMessage}`,
-						);
-
-						this.contextTracker.markFailed(agent.id, errorMessage);
-
-						this.emitPoolEvent(PoolEvent.AGENT_ERROR, {
-							agentId: agent.id,
-							agentName: agent.name,
-							error: errorMessage,
-						});
-					}
-				},
+				`Agent spawned: ${agent.name} for ${subtask.role}`,
 			);
+
+			// Wait for agent to be ready
+			try {
+				await agent.ready;
+			} catch (error) {
+				const errorMessage = toErrorMessage(error);
+
+				this.logger.error(
+					{
+						agentId: agent.id,
+						error: errorMessage,
+					},
+					`Agent failed to initialize: ${errorMessage}`,
+				);
+
+				this.contextTracker.markFailed(agent.id, errorMessage);
+
+				this.emitPoolEvent(PoolEvent.AGENT_ERROR, {
+					agentId: agent.id,
+					agentName: agent.name,
+					error: errorMessage,
+				});
+			}
 
 			return { subtask, agent: agents.get(subtask.id)?.agent };
 		});
@@ -1065,13 +880,6 @@ export class AgentPool extends EventEmitter {
 				if (delta) {
 					this._deltaCount++;
 					this.emitPoolEvent(PoolEvent.DELTA_DETECTED, { delta });
-
-					// Record delta as a trace event on the root span
-					this.tracer.recordRootEvent("pool.delta_detected", {
-						"delta.agent_id": delta.agentId,
-						"delta.type": delta.type,
-						"delta.significance": delta.significance,
-					});
 
 					// Fire-and-forget: don't block the agent event handler
 					void this.handleDelta(delta);
@@ -1120,14 +928,6 @@ export class AgentPool extends EventEmitter {
 				options,
 				timestamp: isoNow(),
 				resolve: originalResolve,
-			});
-
-			// Record as a trace event
-			this.tracer.recordRootEvent("pool.approve_request", {
-				"pool.approval.agent_id": agent.id,
-				"pool.approval.agent_name": agent.name,
-				"pool.approval.tool_call_id": toolCallId,
-				"pool.approval.tool_call_title": toolCallTitle,
 			});
 
 			// Emit pool-level event so external consumers can handle it
@@ -1237,11 +1037,6 @@ export class AgentPool extends EventEmitter {
 					"Subtask execution deadlocked — remaining tasks have unsatisfiable dependencies",
 				);
 
-				// Record deadlock as a trace event
-				this.tracer.recordEvent("pool.subtask_deadlock", {
-					"pool.deadlock.remaining_count": remaining.size,
-				});
-
 				// Mark remaining as failed
 				for (const id of remaining) {
 					const entry = agents.get(id);
@@ -1315,84 +1110,59 @@ export class AgentPool extends EventEmitter {
 					return;
 				}
 
-				// ── Tracing: per-subtask execution span ──────────────────
 				try {
-					await this.tracer.wrap(
-						SpanName.POOL_SUBTASK_EXECUTE,
+					this.logger.info(
 						{
-							"pool.subtask.id": subtaskId,
-							"pool.subtask.role": subtask.role,
-							"pool.subtask.agent_id": agent.id,
-							"pool.subtask.agent_name": entry.agent.name,
+							agentId: agent.id,
+							subtaskId,
+							role: subtask.role,
 						},
-						async (subtaskSpan) => {
-							this.logger.info(
-								{
-									agentId: agent.id,
-									subtaskId,
-									role: subtask.role,
-								},
-								`Executing subtask: ${subtask.role}`,
-							);
+						`Executing subtask: ${subtask.role}`,
+					);
 
-							const promptResult = await agent.prompt(subtask.prompt);
+					const promptResult = await agent.prompt(subtask.prompt);
 
-							this.contextTracker.recordPromptResult(agent.id, promptResult);
-							this.contextTracker.markCompleted(agent.id);
+					this.contextTracker.recordPromptResult(agent.id, promptResult);
+					this.contextTracker.markCompleted(agent.id);
 
-							completed.add(subtaskId);
-							inProgress.delete(subtaskId);
+					completed.add(subtaskId);
+					inProgress.delete(subtaskId);
 
-							const finalState = this.contextTracker.getAgentState(agent.id);
+					const finalState = this.contextTracker.getAgentState(agent.id);
 
-							const executionResult: AgentExecutionResult = {
-								agentId: agent.id,
-								agentName: agent.name,
-								subtask,
-								promptResult,
-								events: finalState?.events ?? [],
-								filesWritten: finalState?.filesWritten ?? [],
-								success: true,
-							};
+					const executionResult: AgentExecutionResult = {
+						agentId: agent.id,
+						agentName: agent.name,
+						subtask,
+						promptResult,
+						events: finalState?.events ?? [],
+						filesWritten: finalState?.filesWritten ?? [],
+						success: true,
+					};
 
-							results.push(executionResult);
+					results.push(executionResult);
 
-							// Store in managed agents map
-							const managedEntry = this.managedAgents.get(agent.id);
-							if (managedEntry) {
-								managedEntry.result = executionResult;
-							}
+					// Store in managed agents map
+					const managedEntry = this.managedAgents.get(agent.id);
+					if (managedEntry) {
+						managedEntry.result = executionResult;
+					}
 
-							this.emitPoolEvent(PoolEvent.AGENT_COMPLETED, {
-								agentId: agent.id,
-								agentName: agent.name,
-								result: executionResult,
-							});
+					this.emitPoolEvent(PoolEvent.AGENT_COMPLETED, {
+						agentId: agent.id,
+						agentName: agent.name,
+						result: executionResult,
+					});
 
-							this.logger.info(
-								{
-									agentId: agent.id,
-									subtaskId,
-									role: subtask.role,
-									responseLength: promptResult.text.length,
-									stopReason: promptResult.stopReason,
-								},
-								`Subtask completed: ${subtask.role}`,
-							);
-
-							// ── Tracing: end subtask span (success) ──────────────
-							if (subtaskSpan.isRecording()) {
-								subtaskSpan.setAttribute(
-									"pool.subtask.stop_reason",
-									promptResult.stopReason,
-								);
-								subtaskSpan.setAttribute(
-									"pool.subtask.response_length",
-									promptResult.text.length,
-								);
-							}
-							// wrap() auto-ends with OK
+					this.logger.info(
+						{
+							agentId: agent.id,
+							subtaskId,
+							role: subtask.role,
+							responseLength: promptResult.text.length,
+							stopReason: promptResult.stopReason,
 						},
+						`Subtask completed: ${subtask.role}`,
 					);
 				} catch (error) {
 					const errorMessage = toErrorMessage(error);
@@ -1490,13 +1260,6 @@ export class AgentPool extends EventEmitter {
 									},
 									"Context shared between agents",
 								);
-
-								this.tracer.recordRootEvent("pool.context_shared", {
-									"pool.sharing.source_agent_id": decision.sourceAgentId,
-									"pool.sharing.target_agent_id": decision.targetAgentId,
-									"pool.sharing.information_length":
-										decision.information.length,
-								});
 							} catch (injectError) {
 								this.logger.warn(
 									{
@@ -1709,12 +1472,6 @@ export class AgentPool extends EventEmitter {
 			},
 			`Approval intent handled: ${resolution.summary}`,
 		);
-
-		this.tracer.recordRootEvent("pool.approval_resolved", {
-			"pool.approval.action": action,
-			"pool.approval.target": targetAgent ?? "all",
-			"pool.approval.count": resolution.count,
-		});
 
 		return resolution.summary;
 	}

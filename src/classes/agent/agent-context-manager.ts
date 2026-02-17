@@ -1,7 +1,7 @@
 /**
  * Manages the queue of context instructions injected into an agent.
  *
- * This is a **pure logic** class with no dependencies on logging, tracing,
+ * This is a **pure logic** class with no dependencies on logging
  * or event emission. It manages a simple FIFO queue of instruction strings
  * that can be:
  *

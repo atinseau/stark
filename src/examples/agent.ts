@@ -94,9 +94,6 @@ async function main(): Promise<void> {
 		},
 		logLevel: "info",
 
-		// OpenTelemetry tracing → Seq (docker compose up -d)
-		tracing: true,
-
 		// Interactive approval — each tool permission request will block
 		// until the user confirms via stdin (Yes/No)
 		autoApprove: false,

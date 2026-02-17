@@ -41,8 +41,4 @@ export type {
 	ToolUpdateEvent,
 	UsageUpdateEvent,
 } from "./events.types.ts";
-export type {
-	EmitEventFn,
-	LogTraceProvider,
-	TraceContext,
-} from "./observability.types.ts";
+export type { EmitEventFn } from "./observability.types.ts";
