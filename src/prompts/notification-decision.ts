@@ -3,27 +3,32 @@ import "./helpers.ts";
 
 // ── Notification Decision: User Prompt ─────────────────────────────────────
 
-const NOTIFICATION_DECISION_SOURCE = `Determine if the user should be notified about this agent pool context change.
+const NOTIFICATION_DECISION_SOURCE = `This context delta has already passed significance ({{delta.significance}} ≥ threshold) and type filters. Your job is purely semantic: decide if this event is genuinely worth interrupting the user for, or if it's routine noise that passed the numeric filters but lacks real informational value.
 
-## User Preference
-- **Enabled**: {{preference.enabled}}
-- **Min Significance**: {{preference.minSignificance}}
-{{#if preference.types}}- **Interested Types**: {{#each preference.types}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
-{{/if}}
+## What Happened
+**Agent**: {{delta.agentName}} (role: {{delta.agentRole}})
+**Event**: {{delta.type}} — {{delta.summary}}
+**Significance**: {{delta.significance}}
 
-## Delta
-- **Agent**: {{delta.agentName}} ({{delta.agentId}})
-- **Type**: {{delta.type}}
-- **Summary**: {{delta.summary}}
-- **Significance**: {{delta.significance}}
-
-## Agent Task
+## Agent's Task
 {{agentTask}}
 
-## Criteria
-1. Does delta meet minimum significance?
-2. Does delta type match user's interests (if specified)?
-3. Is this genuinely useful vs. noise?
+{{#if otherAgentsContext}}
+## Broader Context
+{{otherAgentsContext}}
+{{/if}}
+
+## Decision Guide
+Notify ONLY if this event represents:
+- A meaningful milestone (subtask completion, all tests passing)
+- An error the user should know about (missing dependency, permission issue, repeated failures)
+- An unexpected or concerning outcome
+- The final completion of the overall task or a major phase
+
+Do NOT notify for:
+- Routine progress that the user would expect
+- Events the agent is handling autonomously
+- Intermediate steps in a larger process
 
 ## Examples
 
@@ -36,10 +41,11 @@ Delta: Agent "api-developer" completed all API endpoints successfully. Significa
 }
 
 ### Don't notify: Routine progress
-Delta: Agent "test-writer" read file src/routes/users.ts. Significance: 0.1.
+Delta: Agent "test-writer" read file src/routes/users.ts. Significance: 0.5.
 {
   "shouldNotify": false,
-  "reasoning": "Reading a file is routine agent behavior. Notifying about every file read would be excessive noise."
+  "reasoning": "Reading a file is routine agent behavior. Notifying about every file read would be excessive noise.",
+  "message": ""
 }
 
 ### Notify: Error requiring attention
@@ -53,8 +59,8 @@ Delta: Agent "api-developer" encountered an error — npm package 'pg' not found
 ## JSON Output
 {
   "shouldNotify": true | false,
-  "reasoning": "<why>",
-  "message": "<notification message if shouldNotify is true>"
+  "reasoning": "<concise explanation of why this is or isn't worth the user's attention>",
+  "message": "<clear, human-friendly notification — required if shouldNotify is true, empty string if false>"
 }`;
 
 export const notificationDecisionPrompt = Handlebars.compile(

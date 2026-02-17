@@ -78,9 +78,24 @@ const SUMMARY_SOURCE = `Summarize this task execution.
 
 {{/each}}
 
+{{#if coordination}}
+## Inter-Agent Coordination
+- **Deltas detected**: {{coordination.deltaCount}}
+- **Sharing evaluations**: {{coordination.sharingEvaluationCount}}
+- **Information shared**: {{coordination.sharingApprovedCount}} time(s)
+- **User notifications**: {{coordination.notificationCount}}
+{{#if coordination.sharingSummaries.length}}
+
+### Information Flow
+{{#each coordination.sharingSummaries}}
+- **{{this.sourceAgentName}}** → **{{this.targetAgentName}}**: {{this.informationPreview}}
+{{/each}}
+{{/if}}
+{{/if}}
+
 **Duration**: {{durationMs}}ms | **Agents**: {{agents.length}}
 
-Provide a concise summary.`;
+Provide a concise summary following the structure defined in your system prompt.`;
 
 export const summaryPrompt = Handlebars.compile(SUMMARY_SOURCE, {
 	noEscape: true,

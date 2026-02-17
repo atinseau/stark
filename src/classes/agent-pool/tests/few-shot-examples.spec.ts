@@ -79,19 +79,15 @@ function extractExampleJsonBlocks(promptText: string): string[] {
 // ── Mock data for template compilation ─────────────────────────────────────
 
 const mockNotificationData = {
-	preference: {
-		enabled: true,
-		minSignificance: 0.5,
-		types: ["prompt_complete", "agent_error"],
-	},
 	delta: {
 		agentName: "TestAgent",
-		agentId: "agent-test-id",
+		agentRole: "api-developer",
 		type: "prompt_complete",
 		summary: "Agent completed a prompt",
 		significance: 0.8,
 	},
 	agentTask: "Build a REST API",
+	otherAgentsContext: null,
 };
 
 const mockSharingData = {
@@ -902,11 +898,17 @@ describe("Non-regression — existing prompt content preserved", () => {
 	describe("Notification decision prompt", () => {
 		const rendered = notificationDecisionPrompt(mockNotificationData);
 
-		it("still contains preference/delta/criteria/JSON Output sections", () => {
-			expect(rendered).toContain("## User Preference");
-			expect(rendered).toContain("## Delta");
-			expect(rendered).toContain("## Agent Task");
-			expect(rendered).toContain("## Criteria");
+		it("does not contain removed sections (User Preference, Delta, Criteria)", () => {
+			expect(rendered).not.toContain("## User Preference");
+			expect(rendered).not.toContain("## Delta");
+			expect(rendered).not.toContain("## Criteria");
+		});
+
+		it("contains new semantic framing and sections", () => {
+			expect(rendered).toContain("already passed significance");
+			expect(rendered).toContain("## What Happened");
+			expect(rendered).toContain("## Agent's Task");
+			expect(rendered).toContain("## Decision Guide");
 			expect(rendered).toContain("## JSON Output");
 		});
 	});

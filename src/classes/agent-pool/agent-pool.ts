@@ -28,6 +28,7 @@ import type {
 	AgentPoolState,
 	BasePoolEvent,
 	ContextDelta,
+	CoordinationStats,
 	IntentAnalysis,
 	NotificationPreference,
 	PoolEventMap,
@@ -243,6 +244,13 @@ export class AgentPool extends EventEmitter {
 
 	/** Running count of sharing decisions made. */
 	private _sharingDecisionCount = 0;
+
+	/** Sharing events collected for the execution summary. */
+	private _sharingSummaries: Array<{
+		readonly sourceAgentName: string;
+		readonly targetAgentName: string;
+		readonly informationPreview: string;
+	}> = [];
 
 	/** Whether the pool has been destroyed. */
 	private _destroyed = false;
@@ -465,12 +473,31 @@ export class AgentPool extends EventEmitter {
 			// ── Phase 4 & 5: Summary + Cleanup (parallel) ────────────────
 			this.logger.info("Phase 4+5: Summary & Cleanup (parallel)");
 
+			// Build coordination stats for the summary (multi-agent only)
+			const coordinationStats: CoordinationStats | undefined =
+				analysis.strategy === ExecutionStrategy.MULTI && this.informationBroker
+					? {
+							deltaCount: this._deltaCount,
+							sharingEvaluationCount: this.informationBroker.evaluationCount,
+							sharingApprovedCount: this.informationBroker.shareCount,
+							notificationCount: this.notificationEngine.notificationCount,
+							sharingSummaries: this.buildSharingSummaries(),
+						}
+					: undefined;
+
+			// Calculate duration BEFORE the summary so the prompt gets the real value
+			const durationMs = Date.now() - startTime;
+
 			const [summary] = await Promise.all([
-				this.generateSummary(task, analysis, executionResults),
+				this.generateSummary(
+					task,
+					analysis,
+					executionResults,
+					durationMs,
+					coordinationStats,
+				),
 				this.destroyManagedAgents(),
 			]);
-
-			const durationMs = Date.now() - startTime;
 
 			const poolResult: AgentPoolResult = {
 				task,
@@ -521,6 +548,7 @@ export class AgentPool extends EventEmitter {
 			this.agentToSubtask.clear();
 			this._deltaCount = 0;
 			this._sharingDecisionCount = 0;
+			this._sharingSummaries = [];
 		}
 	}
 
@@ -1287,6 +1315,17 @@ export class AgentPool extends EventEmitter {
 								// Record the sharing for deduplication in future evaluations
 								this.informationBroker?.recordSharing(decision, delta.type);
 
+								// Track sharing event for execution summary
+								const sourceEntry = this.managedAgents.get(
+									decision.sourceAgentId,
+								);
+								this._sharingSummaries.push({
+									sourceAgentName:
+										sourceEntry?.agent.name ?? decision.sourceAgentId,
+									targetAgentName: targetEntry.agent.name,
+									informationPreview: decision.information.slice(0, 150),
+								});
+
 								this.emitPoolEvent(PoolEvent.CONTEXT_SHARED, {
 									sourceAgentId: decision.sourceAgentId,
 									targetAgentId: decision.targetAgentId,
@@ -1357,6 +1396,8 @@ export class AgentPool extends EventEmitter {
 		task: string,
 		analysis: TaskAnalysis,
 		results: AgentExecutionResult[],
+		durationMs: number,
+		coordinationStats?: CoordinationStats,
 	): Promise<string> {
 		const successCount = results.filter((r) => r.success).length;
 		const failCount = results.length - successCount;
@@ -1389,7 +1430,8 @@ export class AgentPool extends EventEmitter {
 				complexity: analysis.complexity,
 				planningReasoning: analysis.reasoning,
 				agents: results,
-				durationMs: 0, // Not known yet at this point
+				durationMs,
+				coordination: coordinationStats ?? null,
 			});
 
 			const summary = await this.conversations.sendOneShot(
@@ -1411,6 +1453,17 @@ export class AgentPool extends EventEmitter {
 				`${successCount} subtask(s) succeeded, ${failCount} failed.`
 			);
 		}
+	}
+
+	// ── Private: Coordination Summary ──────────────────────────────────
+
+	/**
+	 * Builds a summary of sharing events for inclusion in the execution summary.
+	 * Returns the most recent sharing events, limited to avoid prompt bloat.
+	 */
+	private buildSharingSummaries(): CoordinationStats["sharingSummaries"] {
+		const MAX_SHARING_SUMMARIES = 10;
+		return this._sharingSummaries.slice(-MAX_SHARING_SUMMARIES);
 	}
 
 	// ── Private: Intent Analysis ───────────────────────────────────────

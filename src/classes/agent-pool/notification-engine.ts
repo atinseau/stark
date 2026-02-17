@@ -280,21 +280,18 @@ export class NotificationEngine {
 	): Promise<UserNotification | null> {
 		if (!this.preference) return null;
 
-		// Build the notification decision prompt
+		// Build the notification decision prompt with semantic framing
+		// (preference data is intentionally omitted — pre-filters already passed)
 		const prompt = notificationDecisionPrompt({
-			preference: {
-				enabled: this.preference.enabled,
-				minSignificance: this.preference.minSignificance ?? 0.5,
-				types: this.preference.types ?? null,
-			},
 			delta: {
-				agentId: delta.agentId,
 				agentName: delta.agentName,
+				agentRole: agentState.taskRole,
 				type: delta.type,
 				summary: delta.summary,
 				significance: delta.significance,
 			},
 			agentTask: agentState.taskDescription,
+			otherAgentsContext: null, // Placeholder for future evolution
 		});
 
 		this.logger.debug(

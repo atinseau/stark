@@ -390,6 +390,37 @@ export interface UserNotification {
 	readonly timestamp: string;
 }
 
+// ── Coordination Statistics ────────────────────────────────────────────────
+
+/**
+ * Statistics about cross-agent coordination during execution.
+ * Used to enrich the execution summary with coordination context.
+ */
+export interface CoordinationStats {
+	/** Number of context deltas detected across all agents. */
+	readonly deltaCount: number;
+
+	/** Number of sharing evaluations performed by the broker. */
+	readonly sharingEvaluationCount: number;
+
+	/** Number of positive sharing decisions (information actually shared). */
+	readonly sharingApprovedCount: number;
+
+	/** Number of notifications sent to the user. */
+	readonly notificationCount: number;
+
+	/**
+	 * Summary of information shared between agents.
+	 * Each entry describes a sharing event: source → target and what was shared.
+	 * Limited to the most significant sharing events.
+	 */
+	readonly sharingSummaries: ReadonlyArray<{
+		readonly sourceAgentName: string;
+		readonly targetAgentName: string;
+		readonly informationPreview: string;
+	}>;
+}
+
 // ── Intent Analysis Types ──────────────────────────────────────────────────
 
 /**
