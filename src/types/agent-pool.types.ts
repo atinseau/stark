@@ -887,6 +887,71 @@ export interface PlannerMemory {
 	readonly timestamp: string;
 }
 
+// ── Decision Journal ───────────────────────────────────────────────────────
+
+/**
+ * A condensed record of a decision made by the sharing or notification analyzer.
+ *
+ * Each entry captures the essential information about a past decision
+ * to provide context for future decisions without accumulating full
+ * conversation history.
+ */
+export interface DecisionJournalEntry {
+	/** ISO-8601 timestamp of the decision. */
+	readonly timestamp: string;
+
+	/** Type of decision: sharing or notification. */
+	readonly type: "sharing" | "notification";
+
+	/** The agent that produced the delta being evaluated. */
+	readonly sourceAgentName: string;
+
+	/**
+	 * For sharing decisions: the target agent name.
+	 * For notification decisions: "user".
+	 */
+	readonly targetName: string;
+
+	/** The delta type that triggered the evaluation. */
+	readonly deltaType: string;
+
+	/** Whether the decision was positive (share/notify) or negative (skip). */
+	readonly approved: boolean;
+
+	/**
+	 * Condensed reasoning for the decision (max ~120 chars).
+	 * Extracted from the LLM's reasoning field.
+	 */
+	readonly reasoningSummary: string;
+}
+
+/**
+ * Configuration for a DecisionJournal instance.
+ */
+export interface DecisionJournalConfig {
+	/**
+	 * Maximum number of entries retained in the journal.
+	 * Oldest entries are evicted when the limit is reached.
+	 * Default: 15
+	 */
+	readonly maxEntries?: number;
+
+	/**
+	 * Maximum number of entries included in the LLM prompt.
+	 * Should be <= maxEntries. Entries beyond this are still stored
+	 * for analytics but not shown to the LLM.
+	 * Default: 8
+	 */
+	readonly maxEntriesInPrompt?: number;
+
+	/**
+	 * Maximum character length of the reasoningSummary per entry.
+	 * Truncated with "…" if exceeded.
+	 * Default: 120
+	 */
+	readonly maxReasoningLength?: number;
+}
+
 // ── Agent Pool Configuration ───────────────────────────────────────────────
 
 /**

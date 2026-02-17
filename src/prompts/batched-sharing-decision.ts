@@ -4,6 +4,13 @@ import "./helpers.ts";
 // ── Batched Sharing Decision: User Prompt ──────────────────────────────────
 
 const BATCHED_SHARING_DECISION_SOURCE = `Determine if information from one agent should be shared with other agents.
+{{#if decisionJournal}}
+
+## Recent Sharing Decisions (your session memory)
+These are your most recent decisions in this execution. Use them to maintain consistency and detect patterns. Do NOT re-share information you already approved sharing, and respect reasoning from previous denials unless circumstances have changed.
+
+{{decisionJournal}}
+{{/if}}
 
 ## Source Agent
 - **Name**: {{sourceAgent.agentName}} ({{sourceAgent.agentId}})

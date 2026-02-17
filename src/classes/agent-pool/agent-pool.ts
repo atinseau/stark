@@ -650,6 +650,29 @@ export class AgentPool extends EventEmitter {
 				);
 			}
 
+			// Log decision journal analytics before cleanup
+			if (this.informationBroker) {
+				const sharingJournal = this.informationBroker.journal;
+				this.logger.info(
+					{
+						sharingDecisions: sharingJournal.entryCount,
+						sharingApprovalRate: sharingJournal.approvalRate,
+					},
+					`Sharing journal: ${sharingJournal.entryCount} decisions, ${(sharingJournal.approvalRate * 100).toFixed(0)}% approval rate`,
+				);
+			}
+
+			{
+				const notifJournal = this.notificationEngine.journal;
+				this.logger.info(
+					{
+						notificationDecisions: notifJournal.entryCount,
+						notificationApprovalRate: notifJournal.approvalRate,
+					},
+					`Notification journal: ${notifJournal.entryCount} decisions, ${(notifJournal.approvalRate * 100).toFixed(0)}% approval rate`,
+				);
+			}
+
 			const poolResult: AgentPoolResult = {
 				task,
 				strategy: analysis.strategy,
@@ -708,6 +731,10 @@ export class AgentPool extends EventEmitter {
 			this._retryCount = 0;
 			this._timeoutCount = 0;
 			this._replanCount = 0;
+
+			// Clear notification journal between executions
+			// (broker journal is cleaned naturally since broker is recreated)
+			this.notificationEngine.journal.clear();
 		}
 	}
 

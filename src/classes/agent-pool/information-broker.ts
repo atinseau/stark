@@ -5,6 +5,7 @@ import { batchedSharingDecisionPrompt } from "../../prompts/index.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
+	DecisionJournalConfig,
 	SharingDecision,
 	SharingRecord,
 	SignificanceContext,
@@ -14,6 +15,7 @@ import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import type { ContextTracker } from "./context-tracker.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
+import { DecisionJournal } from "./decision-journal.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -276,6 +278,9 @@ export class InformationBroker {
 	 */
 	private readonly sharingHistory = new Map<string, SharingRecord[]>();
 
+	/** Rolling journal of sharing decisions for session memory. */
+	private readonly decisionJournal: DecisionJournal;
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly contextTracker: ContextTracker,
@@ -286,10 +291,13 @@ export class InformationBroker {
 		options?: {
 			/** Override the base significance threshold (default: 0.5). */
 			significanceThreshold?: number;
+			/** Configuration for the decision journal. */
+			journalConfig?: DecisionJournalConfig;
 		},
 	) {
 		this.baseThreshold =
 			options?.significanceThreshold ?? BASE_SIGNIFICANCE_THRESHOLD;
+		this.decisionJournal = new DecisionJournal(options?.journalConfig);
 	}
 
 	// ── Public API ─────────────────────────────────────────────────────
@@ -427,6 +435,14 @@ export class InformationBroker {
 	}
 
 	/** Nombre total de partages enregistrés dans l'historique. */
+	/**
+	 * Returns the decision journal for inspection or cleanup.
+	 * Used by the pool for end-of-execution analytics.
+	 */
+	get journal(): DecisionJournal {
+		return this.decisionJournal;
+	}
+
 	get totalRecordedSharings(): number {
 		let count = 0;
 		for (const records of this.sharingHistory.values()) {
@@ -748,6 +764,9 @@ export class InformationBroker {
 		});
 
 		// Build the batched sharing decision prompt from the Handlebars template
+		// Include the decision journal in the prompt for session memory
+		const journalSection = this.decisionJournal.toPromptSection();
+
 		const prompt = batchedSharingDecisionPrompt({
 			sourceAgent: {
 				agentId: sourceState.agentId,
@@ -767,6 +786,7 @@ export class InformationBroker {
 						: null,
 			},
 			targets,
+			decisionJournal: journalSection,
 		});
 
 		this.logger.debug(
@@ -799,6 +819,23 @@ export class InformationBroker {
 				sourceAgentId: sourceState.agentId,
 				targetAgentId: decision.targetAgentId,
 			}));
+
+			// Record decisions in the journal for session memory
+			for (const decision of results) {
+				const targetState = targetStates.find(
+					(t) => t.agentId === decision.targetAgentId,
+				);
+				const targetName = targetState?.agentName ?? decision.targetAgentId;
+
+				this.decisionJournal.recordSharingDecision(
+					sourceState.agentName,
+					targetName,
+					delta.type,
+					decision.shouldShare,
+					decision.reasoning,
+					delta.timestamp,
+				);
+			}
 
 			// Log summary
 			const shareCount = results.filter((d) => d.shouldShare).length;

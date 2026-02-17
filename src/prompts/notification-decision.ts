@@ -5,6 +5,17 @@ import "./helpers.ts";
 
 const NOTIFICATION_DECISION_SOURCE = `This context delta has already passed significance ({{delta.significance}} ≥ threshold) and type filters. Your job is purely semantic: decide if this event is genuinely worth interrupting the user for, or if it's routine noise that passed the numeric filters but lacks real informational value.
 
+{{#if decisionJournal}}
+## Your Recent Notification Decisions
+These are your most recent decisions in this execution. Maintain consistency and avoid notification fatigue — if you've already notified about similar events recently, be more selective.
+
+{{decisionJournal}}
+
+{{#if recentNotificationCount}}
+⚠️ You have sent {{recentNotificationCount}} notification(s) in the last 60 seconds. Be increasingly selective to avoid overwhelming the user.
+{{/if}}
+{{/if}}
+
 ## What Happened
 **Agent**: {{delta.agentName}} (role: {{delta.agentRole}})
 **Event**: {{delta.type}} — {{delta.summary}}

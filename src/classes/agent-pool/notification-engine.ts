@@ -5,12 +5,14 @@ import { notificationDecisionPrompt } from "../../prompts/index.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
+	DecisionJournalConfig,
 	NotificationPreference,
 	UserNotification,
 } from "../../types/agent-pool.types.ts";
 import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
+import { DecisionJournal } from "./decision-journal.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 
@@ -123,10 +125,16 @@ export class NotificationEngine {
 	/** Running count of evaluations performed (LLM calls). */
 	private _evaluationCount = 0;
 
+	/** Rolling journal of notification decisions for session memory. */
+	private readonly decisionJournal: DecisionJournal;
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly logger: pino.Logger,
-	) {}
+		journalConfig?: DecisionJournalConfig,
+	) {
+		this.decisionJournal = new DecisionJournal(journalConfig);
+	}
 
 	// ── Preference Management ──────────────────────────────────────────
 
@@ -262,6 +270,13 @@ export class NotificationEngine {
 		return this._evaluationCount;
 	}
 
+	/**
+	 * Returns the decision journal for inspection or cleanup.
+	 */
+	get journal(): DecisionJournal {
+		return this.decisionJournal;
+	}
+
 	// ── Private ────────────────────────────────────────────────────────
 
 	/**
@@ -280,6 +295,11 @@ export class NotificationEngine {
 	): Promise<UserNotification | null> {
 		if (!this.preference) return null;
 
+		// Include the decision journal in the prompt for session memory
+		const journalSection = this.decisionJournal.toPromptSection();
+		const recentNotificationCount =
+			this.decisionJournal.countRecentApprovedForTarget("user", 60);
+
 		// Build the notification decision prompt with semantic framing
 		// (preference data is intentionally omitted — pre-filters already passed)
 		const prompt = notificationDecisionPrompt({
@@ -292,6 +312,9 @@ export class NotificationEngine {
 			},
 			agentTask: agentState.taskDescription,
 			otherAgentsContext: null, // Placeholder for future evolution
+			decisionJournal: journalSection,
+			recentNotificationCount:
+				recentNotificationCount > 0 ? recentNotificationCount : null,
 		});
 
 		this.logger.debug(
@@ -320,6 +343,15 @@ export class NotificationEngine {
 				);
 				return null;
 			}
+
+			// Record the decision in the journal for session memory
+			this.decisionJournal.recordNotificationDecision(
+				delta.agentName,
+				delta.type,
+				decision.shouldNotify,
+				decision.reasoning,
+				delta.timestamp,
+			);
 
 			if (!decision.shouldNotify) {
 				this.logger.debug(
