@@ -638,6 +638,18 @@ export class AgentPool extends EventEmitter {
 				this.destroyManagedAgents(),
 			]);
 
+			// Record execution in planner memory for future planning context.
+			// Wrapped in try/catch so a bug in memory recording never crashes
+			// the execution pipeline.
+			try {
+				this.planner.recordExecution(task, analysis, executionResults);
+			} catch (error) {
+				this.logger.warn(
+					{ error: toErrorMessage(error) },
+					"Failed to record planner memory — continuing without",
+				);
+			}
+
 			const poolResult: AgentPoolResult = {
 				task,
 				strategy: analysis.strategy,
@@ -857,6 +869,7 @@ export class AgentPool extends EventEmitter {
 			retryCount: this._retryCount,
 			timeoutCount: this._timeoutCount,
 			pendingApprovals: this.approvalManager.getPendingSummary(),
+			plannerMemoryCount: this.planner.memoryCount,
 		};
 	}
 
@@ -891,6 +904,9 @@ export class AgentPool extends EventEmitter {
 
 		this.logger.info("Destroying AgentPool");
 
+		// Clear planner memory — memories do not survive pool destruction
+		this.planner.clearMemory();
+
 		await this.destroyManagedAgents();
 
 		// Clear conversation history
@@ -899,6 +915,17 @@ export class AgentPool extends EventEmitter {
 		this.emitPoolEvent(PoolEvent.DESTROYED, {});
 
 		this.logger.info("AgentPool destroyed");
+	}
+
+	/**
+	 * Clears the planner's execution memory.
+	 *
+	 * Useful when switching to a completely different project context
+	 * or when the accumulated memory is no longer relevant.
+	 * Called automatically during pool.destroy().
+	 */
+	clearPlannerMemory(): void {
+		this.planner.clearMemory();
 	}
 
 	// ── Typed EventEmitter Overrides ───────────────────────────────────

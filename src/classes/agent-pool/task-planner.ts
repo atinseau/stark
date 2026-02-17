@@ -8,6 +8,8 @@ import {
 	taskAnalysisPrompt,
 } from "../../prompts/index.ts";
 import type {
+	AgentExecutionResult,
+	PlannerMemory,
 	ProjectContext,
 	ReplanDecision,
 	ReplanRequest,
@@ -16,6 +18,7 @@ import type {
 	TaskDependency,
 } from "../../types/agent-pool.types.ts";
 import { toErrorMessage } from "../../utils/errors.ts";
+import { isoNow } from "../../utils/formatting.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
@@ -388,6 +391,20 @@ export class TaskPlanner {
 	/** Maximum number of semantic correction attempts before fallback. */
 	private static readonly MAX_SEMANTIC_RETRIES = 2;
 
+	/**
+	 * Maximum number of previous execution memories retained.
+	 * Older memories are discarded to prevent unbounded growth.
+	 * Each memory is ~500-800 tokens, so 3 memories ≈ 1500-2400 tokens.
+	 */
+	private static readonly MAX_MEMORY_ENTRIES = 3;
+
+	/**
+	 * Rolling memory of previous planning + execution cycles.
+	 * Newest entries are at the end. Oldest are discarded when
+	 * MAX_MEMORY_ENTRIES is exceeded.
+	 */
+	private readonly memories: PlannerMemory[] = [];
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly logger: pino.Logger,
@@ -420,14 +437,15 @@ export class TaskPlanner {
 		constraints?: string[],
 		projectContext?: ProjectContext,
 	): Promise<TaskAnalysis> {
-		// Reset planner conversation to prevent history accumulation
-		// across sequential executions. Each planning call starts fresh,
-		// but semantic retry loops within a single call still work because
-		// sendJson appends to the conversation during correction attempts.
+		// Reset planner conversation — memories survive because they are
+		// stored outside the conversation history.
 		this.conversations.reset(ConversationRole.PLANNER);
 
 		// Sanitize the task text against prompt injection
 		const sanitizedTask = this.conversations.client.sanitize(task);
+
+		// Build the memory context string for injection
+		const memoryContext = this.buildMemoryContext();
 
 		// Build the analysis prompt from the Handlebars template
 		const prompt = taskAnalysisPrompt({
@@ -435,11 +453,16 @@ export class TaskPlanner {
 			contextHints: contextHints ?? null,
 			constraints: constraints ?? null,
 			projectContext: projectContext ?? null,
+			previousExecutions: memoryContext,
 		});
 
 		this.logger.info(
-			{ taskLength: task.length },
-			`Analyzing task (${task.length} chars)`,
+			{
+				taskLength: task.length,
+				memoryCount: this.memories.length,
+				hasMemoryContext: memoryContext !== null,
+			},
+			`Analyzing task (${task.length} chars, ${this.memories.length} memory entries)`,
 		);
 
 		// Attempt to get a semantically valid analysis from the LLM
@@ -711,5 +734,179 @@ export class TaskPlanner {
 			dependencies: [],
 			parallelismBenefit: 0,
 		};
+	}
+
+	// ── Memory Management ──────────────────────────────────────────────
+
+	/**
+	 * Records the results of a completed execution for future planning context.
+	 *
+	 * Called by the AgentPool after execute() completes (success or failure).
+	 * The execution details are condensed into a PlannerMemory entry that
+	 * will be injected into the next analyze() call's prompt.
+	 *
+	 * @param task - The original task description.
+	 * @param analysis - The TaskAnalysis produced by the planner.
+	 * @param results - The execution results for all subtasks.
+	 */
+	recordExecution(
+		task: string,
+		analysis: TaskAnalysis,
+		results: AgentExecutionResult[],
+	): void {
+		const successCount = results.filter((r) => r.success).length;
+		const failedResults = results.filter((r) => !r.success);
+
+		// Build outcome summary
+		const outcomeLines: string[] = [];
+		outcomeLines.push(
+			`${successCount}/${results.length} subtask(s) succeeded.`,
+		);
+
+		for (const result of results) {
+			const status = result.success
+				? "completed"
+				: `failed: ${result.error?.slice(0, 100) ?? "unknown"}`;
+			outcomeLines.push(`- ${result.subtask.role}: ${status}`);
+		}
+
+		// Collect all files affected
+		const allFiles = results.flatMap((r) => r.filesWritten);
+		const uniqueFiles = [...new Set(allFiles)].slice(0, 15);
+
+		// Build lessons learned
+		const lessonParts: string[] = [];
+
+		if (analysis.strategy === ExecutionStrategy.MULTI) {
+			if (failedResults.length === 0) {
+				lessonParts.push(
+					`Multi-agent decomposition worked well for this type of task (${analysis.complexity} complexity).`,
+				);
+			} else {
+				const failedRoles = failedResults.map((r) => r.subtask.role).join(", ");
+				lessonParts.push(
+					`Multi-agent: ${failedRoles} failed. Consider alternative decomposition or single-agent for these concerns.`,
+				);
+			}
+		} else {
+			if (failedResults.length === 0) {
+				lessonParts.push(
+					"Single-agent strategy was appropriate and succeeded.",
+				);
+			} else {
+				lessonParts.push(
+					`Single-agent failed: ${failedResults[0]?.error?.slice(0, 100) ?? "unknown"}. Consider different approach.`,
+				);
+			}
+		}
+
+		// Check for timeout failures specifically
+		const timeoutFailures = failedResults.filter((r) =>
+			r.error?.toLowerCase().includes("timeout"),
+		);
+		if (timeoutFailures.length > 0) {
+			const timeoutRoles = timeoutFailures
+				.map((r) => r.subtask.role)
+				.join(", ");
+			lessonParts.push(
+				`Timeout(s) on: ${timeoutRoles}. These subtasks may need simpler scope.`,
+			);
+		}
+
+		const memory: PlannerMemory = {
+			task: task.slice(0, 200),
+			strategy: analysis.strategy,
+			roles: analysis.subtasks.map((s) => s.role),
+			outcome: outcomeLines.join(" "),
+			filesAffected: uniqueFiles,
+			lessons: lessonParts.join(" "),
+			timestamp: isoNow(),
+		};
+
+		this.memories.push(memory);
+
+		// Enforce memory limit — discard oldest
+		while (this.memories.length > TaskPlanner.MAX_MEMORY_ENTRIES) {
+			this.memories.shift();
+		}
+
+		this.logger.info(
+			{
+				memoryCount: this.memories.length,
+				taskPreview: memory.task.slice(0, 60),
+				strategy: memory.strategy,
+				outcome: memory.outcome.slice(0, 80),
+			},
+			`Planner memory recorded (${this.memories.length}/${TaskPlanner.MAX_MEMORY_ENTRIES} slots)`,
+		);
+	}
+
+	/**
+	 * Builds a condensed text representation of the planner's rolling memory
+	 * for injection into the analysis prompt.
+	 *
+	 * Returns `null` if there are no memories (first execution ever).
+	 *
+	 * The output is a structured text block that gives the planner context
+	 * about what has been done before without carrying the full conversation
+	 * history. Each memory entry is typically 200-400 tokens.
+	 *
+	 * @returns A formatted memory context string, or `null` if no memories exist.
+	 */
+	private buildMemoryContext(): string | null {
+		if (this.memories.length === 0) return null;
+
+		const sections: string[] = [];
+
+		for (const [i, memory] of this.memories.entries()) {
+			const index = i + 1;
+
+			const lines: string[] = [
+				`### Execution ${index} (${memory.timestamp})`,
+				`- **Task**: ${memory.task}`,
+				`- **Strategy**: ${memory.strategy} (${memory.roles.join(", ")})`,
+				`- **Outcome**: ${memory.outcome}`,
+			];
+
+			if (memory.filesAffected.length > 0) {
+				lines.push(
+					`- **Files**: ${memory.filesAffected.slice(0, 10).join(", ")}${memory.filesAffected.length > 10 ? ` (+${memory.filesAffected.length - 10} more)` : ""}`,
+				);
+			}
+
+			lines.push(`- **Lessons**: ${memory.lessons}`);
+
+			sections.push(lines.join("\n"));
+		}
+
+		return sections.join("\n\n");
+	}
+
+	/**
+	 * Clears all stored planner memories.
+	 *
+	 * Useful when the user wants to start fresh or when the pool
+	 * is used for a completely different project context.
+	 */
+	clearMemory(): void {
+		const previousCount = this.memories.length;
+		this.memories.length = 0;
+
+		this.logger.info({ previousCount }, "Planner memory cleared");
+	}
+
+	/**
+	 * Returns the number of execution memories currently stored.
+	 */
+	get memoryCount(): number {
+		return this.memories.length;
+	}
+
+	/**
+	 * Returns a read-only view of the current memories.
+	 * Primarily for debugging and introspection.
+	 */
+	getMemories(): readonly PlannerMemory[] {
+		return this.memories;
 	}
 }

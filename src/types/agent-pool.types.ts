@@ -832,6 +832,61 @@ export interface ProjectContext {
 	readonly isEmpty: boolean;
 }
 
+// ── Planner Memory ─────────────────────────────────────────────────────────
+
+/**
+ * Condensed memory of a previous planning + execution cycle.
+ *
+ * Stored by the TaskPlanner between analyze() calls and injected
+ * as context into subsequent planning prompts. This enables the
+ * planner to make informed decisions about follow-up tasks without
+ * carrying the full conversation history.
+ *
+ * The memory is intentionally small (~500-800 tokens) to avoid
+ * bloating the planner's context window over multiple cycles.
+ */
+export interface PlannerMemory {
+	/**
+	 * The original task that was planned.
+	 * Truncated to 200 chars for memory efficiency.
+	 */
+	readonly task: string;
+
+	/**
+	 * The strategy chosen by the planner (single/multi).
+	 */
+	readonly strategy: ExecutionStrategy;
+
+	/**
+	 * Brief list of subtask roles executed.
+	 * Example: ["api-developer", "test-writer"]
+	 */
+	readonly roles: string[];
+
+	/**
+	 * Execution outcome summary.
+	 * Example: "2/3 subtasks succeeded. api-developer and test-writer completed. docs-writer failed (timeout)."
+	 */
+	readonly outcome: string;
+
+	/**
+	 * Key files created or modified during execution.
+	 * Limited to 15 entries.
+	 */
+	readonly filesAffected: string[];
+
+	/**
+	 * Lessons learned — what worked well or poorly.
+	 * Example: "Multi-agent split worked well for API+tests. Documentation agent timed out — consider single-agent for docs."
+	 */
+	readonly lessons: string;
+
+	/**
+	 * ISO-8601 timestamp of when this memory was created.
+	 */
+	readonly timestamp: string;
+}
+
 // ── Agent Pool Configuration ───────────────────────────────────────────────
 
 /**
@@ -1149,6 +1204,13 @@ export interface AgentPoolState {
 		readonly toolCallTitle: string;
 		readonly timestamp: string;
 	}>;
+
+	/**
+	 * Number of execution memories stored by the planner.
+	 * These memories influence future planning decisions by providing
+	 * context about previous executions in this session.
+	 */
+	readonly plannerMemoryCount: number;
 }
 
 // ── Pool Event Map ─────────────────────────────────────────────────────────

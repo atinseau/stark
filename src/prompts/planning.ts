@@ -36,6 +36,15 @@ When project context is provided:
 5. If the project uses specific tools (e.g., biome for linting, jest for tests), mention them in relevant subtasks.
 6. Each subtask prompt should reference the project context so the agent knows what exists.
 
+## Previous Execution Memory
+When previous execution context is provided:
+1. Do NOT re-plan work that was already completed successfully — reference existing files instead.
+2. If a previous multi-agent decomposition failed, consider a different split or single-agent approach.
+3. If a previous single-agent execution timed out, consider splitting the work into smaller subtasks.
+4. Adapt subtask prompts to reference artifacts from previous executions (e.g., "The API is already implemented in src/routes/users.ts — write tests for it").
+5. Maintain consistency with previous architectural decisions (framework, language, code style) unless the user explicitly asks for a change.
+6. If the new task is clearly a follow-up to a previous one, make subtask prompts that build on the existing code rather than starting from scratch.
+
 ## Examples
 
 ### Example 1: Single-agent — simple task
@@ -162,6 +171,17 @@ const TASK_ANALYSIS_SOURCE = `Analyze this task and determine the optimal execut
 <task>
 {{task}}
 </task>
+
+{{#if previousExecutions}}
+## Previous Execution Context
+The following tasks have been executed recently in this session. Use this context to:
+1. Avoid re-doing work that was already completed successfully.
+2. Reference files and structures that already exist from previous executions.
+3. Learn from failures — if a strategy failed before, consider alternatives.
+4. Understand the user's ongoing workflow and intent.
+
+{{previousExecutions}}
+{{/if}}
 
 {{#if contextHints}}
 ## Context
