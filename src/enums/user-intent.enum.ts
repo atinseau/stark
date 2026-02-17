@@ -17,6 +17,19 @@ export enum UserIntent {
 	/** The user wants to cancel or stop execution. */
 	CANCEL = "cancel",
 
+	/**
+	 * The user is approving or denying a pending agent action.
+	 *
+	 * Detected when there are pending approval requests and the user
+	 * sends a message that explicitly or implicitly authorizes an agent
+	 * to proceed (e.g. "yes", "continue", "authorize Agent-X to use that tool")
+	 * or denies it (e.g. "no", "deny", "don't allow that").
+	 *
+	 * Only classified when `autoApprove` is `false` and there are
+	 * pending approvals in the pool.
+	 */
+	APPROVE_AGENT = "approve_agent",
+
 	/** The intent could not be determined. */
 	UNKNOWN = "unknown",
 }

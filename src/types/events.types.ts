@@ -282,6 +282,23 @@ export interface ModeChangeEvent extends BaseAgentEvent {
 	readonly modeId: string;
 }
 
+// ── Approve Request Events ─────────────────────────────────────────────────
+
+export interface ApproveRequestEvent extends BaseAgentEvent {
+	readonly event: AgentEvent.APPROVE_REQUEST;
+	/** The tool call that requires approval. */
+	readonly toolCallId: string;
+	/** Title of the tool call requesting approval. */
+	readonly toolCallTitle: string;
+	/** Available permission options. */
+	readonly options: PermissionOption[];
+	/**
+	 * Callback the listener MUST invoke to approve (`true`) or deny (`false`)
+	 * the permission request. The agent blocks until this is called.
+	 */
+	readonly resolve: (approved: boolean) => void;
+}
+
 // ── Config Update Events ───────────────────────────────────────────────────
 
 export interface ConfigUpdateEvent extends BaseAgentEvent {
@@ -311,6 +328,7 @@ export type AgentEventPayload =
 	| PermissionRequestedEvent
 	| PermissionGrantedEvent
 	| PermissionDeniedEvent
+	| ApproveRequestEvent
 	| TerminalCreatedEvent
 	| TerminalOutputEvent
 	| TerminalExitEvent
@@ -350,6 +368,8 @@ export interface AgentEventMap {
 	[AgentEvent.PERMISSION_REQUESTED]: PermissionRequestedEvent;
 	[AgentEvent.PERMISSION_GRANTED]: PermissionGrantedEvent;
 	[AgentEvent.PERMISSION_DENIED]: PermissionDeniedEvent;
+
+	[AgentEvent.APPROVE_REQUEST]: ApproveRequestEvent;
 
 	[AgentEvent.TERMINAL_CREATED]: TerminalCreatedEvent;
 	[AgentEvent.TERMINAL_OUTPUT]: TerminalOutputEvent;

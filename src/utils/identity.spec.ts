@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { generateIdentity } from "../src/utils/identity.ts";
+import { generateIdentity } from "./identity.ts";
 
 describe("generateIdentity", () => {
 	it("returns an object with id and name properties", () => {

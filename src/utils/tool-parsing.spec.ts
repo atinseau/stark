@@ -4,7 +4,7 @@ import {
 	parseExitCode,
 	parseToolCommand,
 	parseToolOutput,
-} from "../src/utils/tool-parsing.ts";
+} from "./tool-parsing.ts";
 
 // ── parseToolCommand ───────────────────────────────────────────────────────
 

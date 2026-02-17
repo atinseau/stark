@@ -11,6 +11,7 @@ import type {
 	TaskAnalysis,
 	TaskDependency,
 } from "../../types/agent-pool.types.ts";
+import { toErrorMessage } from "../../utils/errors.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
@@ -337,6 +338,12 @@ export class TaskPlanner {
 		contextHints?: string,
 		constraints?: string[],
 	): Promise<TaskAnalysis> {
+		// Reset planner conversation to prevent history accumulation
+		// across sequential executions. Each planning call starts fresh,
+		// but semantic retry loops within a single call still work because
+		// sendJson appends to the conversation during correction attempts.
+		this.conversations.reset(ConversationRole.PLANNER);
+
 		// Sanitize the task text against prompt injection
 		const sanitizedTask = this.conversations.client.sanitize(task);
 
@@ -400,7 +407,7 @@ export class TaskPlanner {
 				this.logger.warn(
 					{
 						attempt,
-						error: error instanceof Error ? error.message : String(error),
+						error: toErrorMessage(error),
 					},
 					"Task analysis attempt failed",
 				);

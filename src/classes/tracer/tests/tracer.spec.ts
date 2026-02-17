@@ -74,7 +74,7 @@ function parentSpanId(span: ReadableSpan): string | undefined {
 async function shutdownAndCollect(
 	tracer: Tracer,
 	exporter: InMemorySpanExporter,
-	_provider: BasicTracerProvider,
+	_provider?: BasicTracerProvider,
 ): Promise<ReadableSpan[]> {
 	// flush() ends lingering spans + calls forceFlush — exporter still has data
 	await tracer.flush();
@@ -106,79 +106,47 @@ describe("Tracer (disabled)", () => {
 		expect(span.isRecording()).toBe(false);
 	});
 
-	it("all span methods return non-throwing no-ops when disabled", () => {
+	it("all span methods return non-throwing no-ops when disabled", async () => {
 		const tracer = new Tracer({ enabled: false });
 
 		// None of these should throw
 		const _root = tracer.startRootSpan("test.root");
-		const active = tracer.startActiveSpan("test.active");
 
-		// Tool call via public API (external helpers removed)
-		const toolSpan = tracer.startOperation(
-			"agent.tool_call",
-			{
-				"tool.call_id": "tc-1",
-				"tool.title": "Test tool",
-				"tool.kind": "execute",
-			},
-			"active",
-		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
-		const trackedTool = tracer.getTrackedSpan("tc-1");
-		// NOOP spans are not tracked
-		expect(trackedTool).toBeUndefined();
-		tracer.endOperation(toolSpan);
-
-		// Permission via public API
-		const permSpan = tracer.startOperation(
-			"agent.permission",
-			{
-				"permission.tool_call_id": "tc-1",
-				"permission.tool_call_title": "Test",
-			},
-			"active",
-		);
-		permSpan.setAttribute("permission.outcome", "granted");
-		permSpan.setAttribute("permission.option_id", "opt-1");
-		permSpan.setAttribute("permission.option_name", "Allow");
-		permSpan.setStatus({ code: SpanStatusCode.OK });
-		permSpan.end();
-
-		// Terminal via public API
-		const termSpan = tracer.startOperation(
-			"agent.terminal",
-			{
-				"terminal.id": "t-1",
-				"terminal.command": "echo",
-			},
-			"active",
-		);
-		termSpan.setAttribute("terminal.args", ["hello"]);
-		termSpan.setStatus({ code: SpanStatusCode.OK });
-		termSpan.end();
-
-		// Context injection + usage via public API
-		tracer.recordEvent("active", "context.injected", {
-			"context.instructions": "some instructions",
-			"context.queued": false,
+		// wrap / wrapSync with disabled tracer should still execute the fn
+		const wrapResult = await tracer.wrap("test.wrap", async (span) => {
+			expect(span.isRecording()).toBe(false);
+			return "wrap-ok";
 		});
-		tracer.recordEvent("active", "usage.update", {
-			"usage.context_used": 100,
-			"usage.context_size": 1000,
-			"usage.context_percent": 10,
+		expect(wrapResult).toBe("wrap-ok");
+
+		const syncResult = tracer.wrapSync("test.wrapSync", (span) => {
+			expect(span.isRecording()).toBe(false);
+			return "sync-ok";
 		});
+		expect(syncResult).toBe("sync-ok");
 
-		// Generic API
-		const op = tracer.startOperation("custom.op", { key: "val" });
-		tracer.endOperation(op);
+		// startTracked with disabled tracer returns NOOP
+		const tracked = tracer.startTracked("tc-1", "agent.tool_call", {
+			"tool.call_id": "tc-1",
+			"tool.title": "Test tool",
+		});
+		expect(tracked.isRecording()).toBe(false);
+		expect(tracer.getTrackedSpan("tc-1")).toBeUndefined();
 
-		tracer.trackSpan("x", op, "custom");
-		expect(tracer.getTrackedSpan("x")).toBeUndefined(); // NOOP not tracked
-		expect(tracer.removeTrackedSpan("x")).toBeUndefined();
+		// endTracked returns undefined for NOOP
+		expect(tracer.endTracked("tc-1")).toBeUndefined();
 
-		tracer.recordEvent("root", "test.event", { foo: "bar" });
+		// deactivateTracked / activateTracked should not throw
+		tracer.deactivateTracked("tc-1");
+		tracer.activateTracked("tc-1");
 
-		tracer.endActiveSpan(active);
+		// getContext returns undefined when disabled
+		expect(tracer.getContext()).toBeUndefined();
+
+		// recordEvent / recordRootEvent should not throw
+		tracer.recordEvent("test.event", { foo: "bar" });
+		tracer.recordRootEvent("test.event", { foo: "bar" });
+
 		tracer.endRootSpan("ok");
 	});
 
@@ -201,6 +169,7 @@ describe("Tracer — Root Span", () => {
 	});
 
 	afterEach(async () => {
+		tracer.endRootSpan("ok");
 		await provider.shutdown();
 	});
 
@@ -213,15 +182,15 @@ describe("Tracer — Root Span", () => {
 	});
 
 	it("root span carries custom attributes", () => {
-		tracer.startRootSpan("agent.session", {
-			"entity.id": "test-001",
-			"entity.name": "Test Entity",
+		tracer.startRootSpan("test.session", {
+			"entity.id": "abc",
+			"entity.name": "Test",
 		});
 		tracer.endRootSpan("ok");
 
-		const span = findSpan(exporter, "agent.session")!;
-		expect(attr(span, "entity.id")).toBe("test-001");
-		expect(attr(span, "entity.name")).toBe("Test Entity");
+		const span = findSpan(exporter, "test.session")!;
+		expect(attr(span, "entity.id")).toBe("abc");
+		expect(attr(span, "entity.name")).toBe("Test");
 	});
 
 	it("endRootSpan with 'ok' sets status OK", () => {
@@ -234,17 +203,18 @@ describe("Tracer — Root Span", () => {
 
 	it("endRootSpan with 'error' sets status ERROR with message", () => {
 		tracer.startRootSpan("test.session");
-		tracer.endRootSpan("error", "Something failed");
+		tracer.endRootSpan("error", "something went wrong");
 
 		const span = findSpan(exporter, "test.session")!;
 		expect(span.status.code).toBe(SpanStatusCode.ERROR);
-		expect(span.status.message).toBe("Something failed");
+		expect(span.status.message).toBe("something went wrong");
 	});
 
 	it("endRootSpan is safe to call multiple times", () => {
 		tracer.startRootSpan("test.session");
 		tracer.endRootSpan("ok");
 		tracer.endRootSpan("ok"); // should not throw
+		tracer.endRootSpan("error"); // should not throw
 
 		const spans = exporter
 			.getFinishedSpans()
@@ -255,36 +225,35 @@ describe("Tracer — Root Span", () => {
 	it("endRootSpan is a no-op when root span was never started", () => {
 		// Should not throw
 		tracer.endRootSpan("ok");
-		tracer.endRootSpan("error", "nothing here");
+		tracer.endRootSpan("error", "msg");
 
-		expect(exporter.getFinishedSpans()).toHaveLength(0);
+		const spans = exporter.getFinishedSpans();
+		expect(spans).toHaveLength(0);
 	});
 
 	it("startRootSpan ends the previous root span when called twice", async () => {
-		const _firstRoot = tracer.startRootSpan("first.session", {
-			"session.id": "1",
+		tracer.startRootSpan("session.first", {
+			"session.id": "s1",
 		});
-		const _secondRoot = tracer.startRootSpan("second.session", {
-			"session.id": "2",
+		tracer.startRootSpan("session.second", {
+			"session.id": "s2",
 		});
 		tracer.endRootSpan("ok");
-		await provider.forceFlush();
+
 		const spans = exporter.getFinishedSpans();
-		const firstSpan = spans.find((s) => s.name === "first.session");
-		const secondSpan = spans.find((s) => s.name === "second.session");
+		const firstSpan = spans.find((s) => s.name === "session.first");
+		const secondSpan = spans.find((s) => s.name === "session.second");
+
 		expect(firstSpan).toBeDefined();
 		expect(firstSpan!.status.code).toBe(SpanStatusCode.ERROR);
-		expect(firstSpan!.status.message).toBe(
-			"Root span replaced before completion",
-		);
 		expect(secondSpan).toBeDefined();
 		expect(secondSpan!.status.code).toBe(SpanStatusCode.OK);
 	});
 });
 
-// ── Active Span ────────────────────────────────────────────────────────────
+// ── Scoped Spans (wrap / wrapSync) ─────────────────────────────────────────
 
-describe("Tracer — Active Span", () => {
+describe("Tracer — Scoped Spans (wrap / wrapSync)", () => {
 	let tracer: Tracer;
 	let exporter: InMemorySpanExporter;
 	let provider: BasicTracerProvider;
@@ -299,206 +268,97 @@ describe("Tracer — Active Span", () => {
 		await provider.shutdown();
 	});
 
-	it("startActiveSpan creates a span with the given name", () => {
-		const span = tracer.startActiveSpan("test.active", {
-			"active.index": 1,
-			"active.text": "hello",
-		});
-		tracer.endActiveSpan(span);
+	it("wrap() creates a span with the given name", async () => {
+		await tracer.wrap("test.operation", async (_span) => {});
 
-		const found = findSpan(exporter, "test.active");
+		const found = findSpan(exporter, "test.operation");
 		expect(found).toBeDefined();
 	});
 
-	it("active span carries custom attributes", () => {
-		const span = tracer.startActiveSpan("test.active", {
-			"prompt.index": 1,
-			"prompt.text": "hello world".slice(0, 500),
-			"prompt.text_length": 11,
-		});
-		tracer.endActiveSpan(span);
+	it("wrap() carries custom attributes", async () => {
+		await tracer.wrap(
+			"test.operation",
+			{
+				"prompt.index": 1,
+				"prompt.text": "hello world",
+				"prompt.text_length": 11,
+			},
+			async (_span) => {},
+		);
 
-		const found = findSpan(exporter, "test.active")!;
+		const found = findSpan(exporter, "test.operation")!;
 		expect(attr(found, "prompt.index")).toBe(1);
 		expect(attr(found, "prompt.text")).toBe("hello world");
 		expect(attr(found, "prompt.text_length")).toBe(11);
 	});
 
-	it("endActiveSpan with error sets ERROR status", () => {
-		const span = tracer.startActiveSpan("test.active");
-		tracer.endActiveSpan(span, new Error("prompt failed"));
+	it("wrap() sets OK status on success", async () => {
+		await tracer.wrap("test.operation", async (_span) => "result");
 
-		const found = findSpan(exporter, "test.active")!;
-		expect(found.status.code).toBe(SpanStatusCode.ERROR);
-	});
-
-	it("endActiveSpan with success sets OK status", () => {
-		const span = tracer.startActiveSpan("test.active");
-		tracer.endActiveSpan(span);
-
-		const found = findSpan(exporter, "test.active")!;
+		const found = findSpan(exporter, "test.operation")!;
 		expect(found.status.code).toBe(SpanStatusCode.OK);
 	});
 
-	it("active span shares the same traceId as the root span", () => {
-		const span = tracer.startActiveSpan("test.active");
-		tracer.endActiveSpan(span);
-		tracer.endRootSpan("ok");
+	it("wrap() sets ERROR status and re-throws on failure", async () => {
+		const work = tracer.wrap("failing.op", async (_span) => {
+			throw new Error("something broke");
+		});
 
-		const rootSpan = findSpan(exporter, "test.session")!;
-		const activeSpan = findSpan(exporter, "test.active")!;
-		expect(activeSpan.spanContext().traceId).toBe(
-			rootSpan.spanContext().traceId,
-		);
-	});
-
-	it("active span is a child of the root span", () => {
-		const span = tracer.startActiveSpan("test.active");
-		tracer.endActiveSpan(span);
-		tracer.endRootSpan("ok");
-
-		const rootSpan = findSpan(exporter, "test.session")!;
-		const activeSpan = findSpan(exporter, "test.active")!;
-		const parent = parentSpanId(activeSpan);
-		expect(parent).toBe(rootSpan.spanContext().spanId);
-	});
-
-	it("supports multiple sequential active spans", () => {
-		const a1 = tracer.startActiveSpan("test.active.1");
-		tracer.endActiveSpan(a1);
-
-		const a2 = tracer.startActiveSpan("test.active.2");
-		tracer.endActiveSpan(a2);
-
-		const actives = exporter
-			.getFinishedSpans()
-			.filter((s) => s.name.startsWith("test.active"));
-		expect(actives).toHaveLength(2);
-	});
-});
-
-// ── Generic API ────────────────────────────────────────────────────────────
-
-describe("Tracer — Generic API", () => {
-	let tracer: Tracer;
-	let exporter: InMemorySpanExporter;
-	let provider: BasicTracerProvider;
-
-	beforeEach(() => {
-		({ tracer, exporter, provider } = createTestTracer());
-		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
-	});
-
-	afterEach(async () => {
-		tracer.endRootSpan("ok");
-		await provider.shutdown();
-	});
-
-	it("startOperation creates a span with the given name and attributes", () => {
-		const span = tracer.startOperation(
-			"custom.op",
-			{
-				"custom.key": "value",
-				"custom.num": 42,
-			},
-			"active",
-		);
-		tracer.endOperation(span);
-
-		const found = findSpan(exporter, "custom.op")!;
-		expect(found).toBeDefined();
-		expect(attr(found, "custom.key")).toBe("value");
-		expect(attr(found, "custom.num")).toBe(42);
-	});
-
-	it("endOperation with error sets ERROR status", () => {
-		const span = tracer.startOperation("failing.op", {}, "active");
-		tracer.endOperation(span, new Error("something broke"));
+		await expect(work).rejects.toThrow("something broke");
 
 		const found = findSpan(exporter, "failing.op")!;
 		expect(found.status.code).toBe(SpanStatusCode.ERROR);
 		expect(found.status.message).toBe("something broke");
 	});
 
-	it("traced() creates and auto-closes a span on success", async () => {
-		const result = await tracer.traced(
-			"fs.read",
-			async (span) => {
-				span.setAttribute("fs.path", "/test.txt");
-				return "file content";
-			},
-			{ attributes: { "fs.operation": "read" }, parent: "active" },
-		);
-
-		expect(result).toBe("file content");
-
-		const found = findSpan(exporter, "fs.read")!;
-		expect(found).toBeDefined();
-		expect(found.status.code).toBe(SpanStatusCode.OK);
-		expect(attr(found, "fs.operation")).toBe("read");
-		expect(attr(found, "fs.path")).toBe("/test.txt");
-	});
-
-	it("traced() sets ERROR status and re-throws on failure", async () => {
-		const work = tracer.traced(
-			"fs.write",
-			async (_span) => {
-				throw new Error("EACCES: permission denied");
-			},
-			{ attributes: { "fs.path": "/root/file" }, parent: "active" },
-		);
-
-		await expect(work).rejects.toThrow("EACCES: permission denied");
-
-		const found = findSpan(exporter, "fs.write")!;
-		expect(found).toBeDefined();
-		expect(found.status.code).toBe(SpanStatusCode.ERROR);
-		expect(found.status.message).toBe("EACCES: permission denied");
-	});
-
-	it("traced() span is a child of the active span", async () => {
-		await tracer.traced("custom.op", async (_span) => "ok", {
-			parent: "active",
+	it("wrap() returns the callback's return value", async () => {
+		const result = await tracer.wrap("fs.read", async (span) => {
+			span.setAttribute("fs.path", "/test.txt");
+			return "file content";
 		});
 
-		const customSpan = findSpan(exporter, "custom.op")!;
-		const parent = parentSpanId(customSpan);
-		expect(parent).toBeDefined();
-		expect(parent?.length).toBe(16);
+		expect(result).toBe("file content");
 	});
 
-	it("startOperation with explicit parent span creates a child", () => {
-		const parentOp = tracer.startOperation("parent.op", {}, "root");
-		const childOp = tracer.startOperation("child.op", {}, parentOp);
-		tracer.endOperation(childOp);
-		tracer.endOperation(parentOp);
-
-		const parentFound = findSpan(exporter, "parent.op")!;
-		const childFound = findSpan(exporter, "child.op")!;
-		const childParent = parentSpanId(childFound);
-		expect(childParent).toBe(parentFound.spanContext().spanId);
-	});
-
-	it("startOperation with 'root' creates a child of the root span", () => {
-		const span = tracer.startOperation("root-child.op", {}, "root");
-		tracer.endOperation(span);
+	it("wrap() span shares the same traceId as the root span", async () => {
+		await tracer.wrap("test.operation", async (_span) => {});
 		tracer.endRootSpan("ok");
 
 		const rootSpan = findSpan(exporter, "test.session")!;
-		const childSpan = findSpan(exporter, "root-child.op")!;
+		const childSpan = findSpan(exporter, "test.operation")!;
+		expect(childSpan.spanContext().traceId).toBe(
+			rootSpan.spanContext().traceId,
+		);
+	});
+
+	it("wrap() span is a child of the root span", async () => {
+		await tracer.wrap("test.operation", async (_span) => {});
+		tracer.endRootSpan("ok");
+
+		const rootSpan = findSpan(exporter, "test.session")!;
+		const childSpan = findSpan(exporter, "test.operation")!;
 		const parent = parentSpanId(childSpan);
 		expect(parent).toBe(rootSpan.spanContext().spanId);
 	});
 
-	it("tracedSync() creates and auto-closes a span on success", () => {
-		const result = tracer.tracedSync(
+	it("nested wrap() calls form correct parent-child hierarchy", async () => {
+		await tracer.wrap("outer.op", async (_outerSpan) => {
+			await tracer.wrap("inner.op", async (_innerSpan) => {});
+		});
+
+		const outerSpan = findSpan(exporter, "outer.op")!;
+		const innerSpan = findSpan(exporter, "inner.op")!;
+		expect(parentSpanId(innerSpan)).toBe(outerSpan.spanContext().spanId);
+	});
+
+	it("wrapSync() creates and auto-closes a span on success", () => {
+		const result = tracer.wrapSync(
 			"json.parse",
+			{ "json.length": 20 },
 			(span) => {
 				span.setAttribute("json.keys", 3);
 				return { a: 1, b: 2, c: 3 };
 			},
-			{ attributes: { "json.length": 20 }, parent: "active" },
 		);
 
 		expect(result).toEqual({ a: 1, b: 2, c: 3 });
@@ -510,15 +370,11 @@ describe("Tracer — Generic API", () => {
 		expect(attr(found, "json.keys")).toBe(3);
 	});
 
-	it("tracedSync() sets ERROR status and re-throws on failure", () => {
+	it("wrapSync() sets ERROR status and re-throws on failure", () => {
 		expect(() =>
-			tracer.tracedSync(
-				"json.parse.fail",
-				(_span) => {
-					throw new Error("Unexpected token");
-				},
-				{ attributes: { "json.length": 5 }, parent: "active" },
-			),
+			tracer.wrapSync("json.parse.fail", { "json.length": 5 }, (_span) => {
+				throw new Error("Unexpected token");
+			}),
 		).toThrow("Unexpected token");
 
 		const found = findSpan(exporter, "json.parse.fail")!;
@@ -527,19 +383,85 @@ describe("Tracer — Generic API", () => {
 		expect(found.status.message).toBe("Unexpected token");
 	});
 
-	it("tracedSync() span is a child of the active span", () => {
-		tracer.tracedSync("sync.child", (_span) => "ok", {
-			parent: "active",
-		});
+	it("wrapSync() span is a child of the root span", () => {
+		tracer.wrapSync("sync.child", (_span) => "ok");
+		tracer.endRootSpan("ok");
 
+		const rootSpan = findSpan(exporter, "test.session")!;
 		const childSpan = findSpan(exporter, "sync.child")!;
 		const parent = parentSpanId(childSpan);
-		expect(parent).toBeDefined();
-		expect(parent?.length).toBe(16);
+		expect(parent).toBe(rootSpan.spanContext().spanId);
+	});
+
+	it("nested wrapSync() calls form correct parent-child hierarchy", () => {
+		tracer.wrapSync("outer.sync", (_outerSpan) => {
+			tracer.wrapSync("inner.sync", (_innerSpan) => {});
+		});
+
+		const outerSpan = findSpan(exporter, "outer.sync")!;
+		const innerSpan = findSpan(exporter, "inner.sync")!;
+		expect(parentSpanId(innerSpan)).toBe(outerSpan.spanContext().spanId);
+	});
+
+	it("supports multiple sequential wrap() calls as siblings", async () => {
+		await tracer.wrap("op.1", async () => {});
+		await tracer.wrap("op.2", async () => {});
+
+		tracer.endRootSpan("ok");
+		const rootSpan = findSpan(exporter, "test.session")!;
+		const op1 = findSpan(exporter, "op.1")!;
+		const op2 = findSpan(exporter, "op.2")!;
+
+		// Both should be children of root, not chained
+		expect(parentSpanId(op1)).toBe(rootSpan.spanContext().spanId);
+		expect(parentSpanId(op2)).toBe(rootSpan.spanContext().spanId);
+	});
+
+	it("error in one wrap() does not affect the next", async () => {
+		try {
+			await tracer.wrap("active.1", async () => {
+				throw new Error("failed");
+			});
+		} catch {
+			// expected
+		}
+
+		await tracer.wrap("active.2", async () => "ok");
+
+		const first = findSpan(exporter, "active.1")!;
+		const second = findSpan(exporter, "active.2")!;
+		expect(first.status.code).toBe(SpanStatusCode.ERROR);
+		expect(second.status.code).toBe(SpanStatusCode.OK);
+	});
+
+	it("wrap() with attributes creates a span with the given attributes", async () => {
+		await tracer.wrap(
+			"custom.op",
+			{
+				"custom.key": "value",
+				"custom.num": 42,
+			},
+			async (_span) => {},
+		);
+
+		const found = findSpan(exporter, "custom.op")!;
+		expect(found).toBeDefined();
+		expect(attr(found, "custom.key")).toBe("value");
+		expect(attr(found, "custom.num")).toBe(42);
+	});
+
+	it("wrap() allows setting attributes inside the callback", async () => {
+		await tracer.wrap("fs.read", { "fs.operation": "read" }, async (span) => {
+			span.setAttribute("fs.path", "/test.txt");
+		});
+
+		const found = findSpan(exporter, "fs.read")!;
+		expect(attr(found, "fs.operation")).toBe("read");
+		expect(attr(found, "fs.path")).toBe("/test.txt");
 	});
 });
 
-// ── Span Tracking ──────────────────────────────────────────────────────────
+// ── Span Tracking (startTracked / endTracked) ─────────────────────────────
 
 describe("Tracer — Span Tracking", () => {
 	let tracer: Tracer;
@@ -549,7 +471,6 @@ describe("Tracer — Span Tracking", () => {
 	beforeEach(() => {
 		({ tracer, exporter, provider } = createTestTracer());
 		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
 	});
 
 	afterEach(async () => {
@@ -557,72 +478,69 @@ describe("Tracer — Span Tracking", () => {
 		await provider.shutdown();
 	});
 
-	it("trackSpan stores a recording span and getTrackedSpan retrieves it", () => {
-		const span = tracer.startOperation("test.op", {}, "active");
-		tracer.trackSpan("my-id", span, "test");
+	it("startTracked creates a span and getTrackedSpan retrieves it", () => {
+		const span = tracer.startTracked("my-id", "test.op", {}, "test");
 
+		expect(span.isRecording()).toBe(true);
 		const retrieved = tracer.getTrackedSpan("my-id");
 		expect(retrieved).toBe(span);
 
-		tracer.endOperation(span);
+		tracer.endTracked("my-id");
 	});
 
-	it("removeTrackedSpan removes and returns the span", () => {
-		const span = tracer.startOperation("test.op", {}, "active");
-		tracer.trackSpan("my-id", span, "test");
+	it("endTracked removes and returns the span", () => {
+		tracer.startTracked("my-id", "test.op", {}, "test");
 
-		const removed = tracer.removeTrackedSpan("my-id");
-		expect(removed).toBe(span);
+		const removed = tracer.endTracked("my-id");
+		expect(removed).toBeDefined();
 		expect(tracer.getTrackedSpan("my-id")).toBeUndefined();
-
-		tracer.endOperation(span);
 	});
 
-	it("removeTrackedSpan returns undefined for unknown IDs", () => {
-		expect(tracer.removeTrackedSpan("nonexistent")).toBeUndefined();
+	it("endTracked returns undefined for unknown IDs", () => {
+		expect(tracer.endTracked("nonexistent")).toBeUndefined();
 	});
 
 	it("getTrackedSpan returns undefined for unknown IDs", () => {
 		expect(tracer.getTrackedSpan("nonexistent")).toBeUndefined();
 	});
 
-	it("trackSpan silently ignores non-recording spans", () => {
+	it("startTracked silently ignores non-recording spans", () => {
 		const disabledTracer = new Tracer({ enabled: false });
 		disabledTracer.startRootSpan("test.root");
-		const span = disabledTracer.startOperation("test");
-		disabledTracer.trackSpan("x", span);
+		const span = disabledTracer.startTracked("x", "test.op");
+		expect(span.isRecording()).toBe(false);
 		expect(disabledTracer.getTrackedSpan("x")).toBeUndefined();
 	});
 
-	it("trackSpan silently ignores empty string IDs", () => {
-		const span = tracer.startOperation("test.op", {}, "active");
-		tracer.trackSpan("", span, "test");
+	it("startTracked silently ignores empty string IDs", () => {
+		const span = tracer.startTracked("", "test.op");
+		expect(span.isRecording()).toBe(false);
 		expect(tracer.getTrackedSpan("")).toBeUndefined();
-		tracer.endOperation(span);
 	});
 
 	it("getTrackedSpan returns undefined for empty string ID", () => {
 		expect(tracer.getTrackedSpan("")).toBeUndefined();
 	});
 
-	it("removeTrackedSpan returns undefined for empty string ID", () => {
-		expect(tracer.removeTrackedSpan("")).toBeUndefined();
+	it("endTracked returns undefined for empty string ID", () => {
+		expect(tracer.endTracked("")).toBeUndefined();
 	});
 
-	it("trackSpan with duplicate ID ends previous span with ERROR", () => {
-		const span1 = tracer.startOperation("first.op", {}, "active");
-		tracer.trackSpan("dup-id", span1, "first operation");
-
-		const span2 = tracer.startOperation("second.op", {}, "active");
-		tracer.trackSpan("dup-id", span2, "second operation");
+	it("startTracked with duplicate ID ends previous span with ERROR", () => {
+		tracer.startTracked("dup-id", "first.op", {}, "first operation");
+		const span2 = tracer.startTracked(
+			"dup-id",
+			"second.op",
+			{},
+			"second operation",
+		);
 
 		// The retrieved span should be the second one
 		expect(tracer.getTrackedSpan("dup-id")).toBe(span2);
 
 		// End span2 properly
-		const removed = tracer.removeTrackedSpan("dup-id");
+		const removed = tracer.endTracked("dup-id");
 		expect(removed).toBe(span2);
-		tracer.endOperation(span2);
 
 		// First span should have been ended with ERROR
 		const firstSpan = findSpan(exporter, "first.op")!;
@@ -631,6 +549,79 @@ describe("Tracer — Span Tracking", () => {
 		expect(firstSpan.status.message).toBe(
 			"first operation replaced before completion",
 		);
+	});
+
+	it("endTracked with error sets ERROR status", () => {
+		tracer.startTracked("my-id", "test.op", {}, "test");
+
+		tracer.endTracked("my-id", new Error("tool failed"));
+
+		const found = findSpan(exporter, "test.op")!;
+		expect(found.status.code).toBe(SpanStatusCode.ERROR);
+		expect(found.status.message).toBe("tool failed");
+	});
+
+	it("endTracked without error sets OK status", () => {
+		tracer.startTracked("my-id", "test.op", {}, "test");
+
+		tracer.endTracked("my-id");
+
+		const found = findSpan(exporter, "test.op")!;
+		expect(found.status.code).toBe(SpanStatusCode.OK);
+	});
+
+	it("deactivateTracked removes span from context stack without ending it", () => {
+		const span = tracer.startTracked("my-id", "test.op", {}, "test");
+
+		// deactivateTracked should not end the span
+		tracer.deactivateTracked("my-id");
+		expect(span.isRecording()).toBe(true);
+		expect(tracer.getTrackedSpan("my-id")).toBe(span);
+
+		// After deactivation, getContext should fall back to root
+		const ctx = tracer.getContext();
+		expect(ctx).toBeDefined();
+		const rootCtx = tracer.getRootSpanContext();
+		expect(ctx!.SpanId).toBe(rootCtx!.spanId);
+
+		tracer.endTracked("my-id");
+	});
+
+	it("activateTracked re-activates a deactivated span", () => {
+		const span = tracer.startTracked("my-id", "test.op", {}, "test");
+
+		tracer.deactivateTracked("my-id");
+
+		// After deactivation, context falls back to root
+		const rootCtx = tracer.getRootSpanContext();
+		expect(tracer.getContext()!.SpanId).toBe(rootCtx!.spanId);
+
+		// Re-activate
+		tracer.activateTracked("my-id");
+
+		// Now context should point to the tracked span again
+		expect(tracer.getContext()!.SpanId).toBe(span.spanContext().spanId);
+
+		tracer.endTracked("my-id");
+	});
+
+	it("tracked span is a child of the current context", async () => {
+		await tracer.wrap("parent.op", async (_parentSpan) => {
+			const _toolSpan = tracer.startTracked(
+				"tc-1",
+				"agent.tool_call",
+				{ "tool.call_id": "tc-1" },
+				"tool call",
+			);
+
+			tracer.endTracked("tc-1");
+
+			// Verify parenting after both are exported
+			const toolFound = findSpan(exporter, "agent.tool_call")!;
+			const _parentFound = findSpan(exporter, "parent.op");
+			// parent.op hasn't ended yet (we're still inside wrap), so check the other way
+			expect(parentSpanId(toolFound)).toBe(_parentSpan.spanContext().spanId);
+		});
 	});
 });
 
@@ -651,8 +642,8 @@ describe("Tracer — Event Recording", () => {
 		await provider.shutdown();
 	});
 
-	it("recordEvent adds an event to the root span", () => {
-		tracer.recordEvent("root", "test.event", { key: "value" });
+	it("recordRootEvent adds an event to the root span", () => {
+		tracer.recordRootEvent("test.event", { key: "value" });
 		tracer.endRootSpan("ok");
 
 		const session = findSpan(exporter, "test.session")!;
@@ -661,24 +652,37 @@ describe("Tracer — Event Recording", () => {
 		expect(event!.attributes!.key).toBe("value");
 	});
 
-	it("recordEvent with 'active' targets the active span when active", () => {
-		const active = tracer.startActiveSpan("test.active");
-		tracer.recordEvent("active", "usage.update", { "usage.percent": 50 });
-		tracer.endActiveSpan(active);
-
-		const activeSpan = findSpan(exporter, "test.active")!;
-		const event = activeSpan.events.find((e) => e.name === "usage.update");
-		expect(event).toBeDefined();
-		expect(event!.attributes!["usage.percent"]).toBe(50);
-	});
-
-	it("recordEvent with 'active' falls back to root when no active span", () => {
-		tracer.recordEvent("active", "some.event", { x: 1 });
+	it("recordEvent targets the current span (root when no wrap)", () => {
+		tracer.recordEvent("some.event", { x: 1 });
 		tracer.endRootSpan("ok");
 
 		const session = findSpan(exporter, "test.session")!;
 		const event = session.events.find((e) => e.name === "some.event");
 		expect(event).toBeDefined();
+	});
+
+	it("recordEvent targets the wrap span inside a wrap() callback", async () => {
+		await tracer.wrap("test.prompt", async (_span) => {
+			tracer.recordEvent("usage.update", { "usage.percent": 50 });
+		});
+
+		const promptSpan = findSpan(exporter, "test.prompt")!;
+		const event = promptSpan.events.find((e) => e.name === "usage.update");
+		expect(event).toBeDefined();
+		expect(event!.attributes!["usage.percent"]).toBe(50);
+	});
+
+	it("recordEvent targets tracked span when one is active", () => {
+		tracer.startTracked("tc-1", "agent.tool_call", {}, "tool call");
+
+		tracer.recordEvent("tool.update", { "tool.progress": "50%" });
+
+		tracer.endTracked("tc-1");
+
+		const toolSpan = findSpan(exporter, "agent.tool_call")!;
+		const event = toolSpan.events.find((e) => e.name === "tool.update");
+		expect(event).toBeDefined();
+		expect(event!.attributes!["tool.progress"]).toBe("50%");
 	});
 });
 
@@ -688,18 +692,17 @@ describe("Tracer — Shutdown", () => {
 	it("shutdown ends all lingering tracked spans with ERROR", async () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
 
-		// Start a tool call span via public API
-		const toolSpan = tracer.startOperation(
+		// Start a tool call span via startTracked
+		tracer.startTracked(
+			"tc-1",
 			"agent.tool_call",
 			{
 				"tool.call_id": "tc-1",
 				"tool.title": "Lingering tool",
 			},
-			"active",
+			"tool call",
 		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 		const toolSpanFound = spans.find((s) => s.name === "agent.tool_call");
@@ -716,41 +719,23 @@ describe("Tracer — Shutdown", () => {
 	it("shutdown ends lingering terminal spans with ERROR", async () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
 
-		// Start a terminal span via public API
-		const termSpan = tracer.startOperation(
+		// Start a terminal span via startTracked
+		tracer.startTracked(
+			"t-1",
 			"agent.terminal",
 			{
 				"terminal.id": "t-1",
 				"terminal.command": "long-running",
 			},
-			"active",
+			"terminal",
 		);
-		tracer.trackSpan("t-1", termSpan, "terminal");
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 		const termSpanFound = spans.find((s) => s.name === "agent.terminal");
 
 		expect(termSpanFound).toBeDefined();
 		expect(termSpanFound!.status.code).toBe(SpanStatusCode.ERROR);
-
-		const rootSpan = spans.find((s) => s.name === "test.session");
-		expect(rootSpan).toBeDefined();
-		expect(rootSpan!.status.code).toBe(SpanStatusCode.ERROR);
-		expect(rootSpan!.status.message).toBe("Session ended with lingering spans");
-	});
-
-	it("shutdown ends lingering active span with ERROR", async () => {
-		const { tracer, exporter, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
-
-		const spans = await shutdownAndCollect(tracer, exporter, provider);
-		const activeSpan = spans.find((s) => s.name === "test.active");
-
-		expect(activeSpan).toBeDefined();
-		expect(activeSpan!.status.code).toBe(SpanStatusCode.ERROR);
 
 		const rootSpan = spans.find((s) => s.name === "test.session");
 		expect(rootSpan).toBeDefined();
@@ -786,29 +771,26 @@ describe("Tracer — Shutdown", () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const initSpan = tracer.startOperation("init", {}, "root");
-		tracer.endOperation(initSpan);
+		// Create some child spans
+		await tracer.wrap("init", async () => {});
 
-		const _active = tracer.startActiveSpan("test.active");
-
-		// Start a tool call span via public API
-		const toolSpan = tracer.startOperation(
+		// Start a tool call span that we don't end
+		tracer.startTracked(
+			"tc-1",
 			"agent.tool_call",
 			{
 				"tool.call_id": "tc-1",
 				"tool.title": "Tool",
 			},
-			"active",
+			"tool call",
 		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
 
-		// Don't manually end active or tool — shutdown should handle it
+		// Don't manually end tool — shutdown should handle it
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 
 		const names = spans.map((s) => s.name).sort();
 		expect(names).toContain("test.session");
 		expect(names).toContain("init");
-		expect(names).toContain("test.active");
 		expect(names).toContain("agent.tool_call");
 
 		const rootSpan = spans.find((s) => s.name === "test.session");
@@ -830,134 +812,108 @@ describe("Tracer — Full Lifecycle", () => {
 			"agent.name": "Test Agent",
 		});
 
-		// Initialize phase
-		const initSpan = tracer.startOperation("agent.initialize", {}, "root");
-		const spawnPhase = tracer.startOperation(
-			"agent.initialize.spawn-process",
-			{},
-			initSpan,
-		);
-		tracer.endOperation(spawnPhase);
-		const acpPhase = tracer.startOperation(
-			"agent.initialize.acp-protocol-init",
-			{},
-			initSpan,
-		);
-		tracer.endOperation(acpPhase);
-		const sessionPhase = tracer.startOperation(
-			"agent.initialize.create-session",
-			{},
-			initSpan,
-		);
-		tracer.endOperation(sessionPhase);
-		tracer.endOperation(initSpan);
+		// Initialize phase — nested wrap() calls
+		await tracer.wrap("agent.initialize", async () => {
+			await tracer.wrap("agent.initialize.spawn-process", async () => {});
+			await tracer.wrap("agent.initialize.acp-protocol-init", async () => {});
+			await tracer.wrap("agent.initialize.create-session", async () => {});
+		});
 
 		// First prompt
-		const p1 = tracer.startActiveSpan("agent.prompt", {
-			"prompt.index": 1,
-			"prompt.text": "Hello",
-		});
-
-		// Tool call via public API
-		const toolSpan = tracer.startOperation(
-			"agent.tool_call",
+		await tracer.wrap(
+			"agent.prompt",
 			{
-				"tool.call_id": "tc-1",
-				"tool.title": "Run tests",
-				"tool.kind": "execute",
-				"tool.command": "bun test",
+				"prompt.index": 1,
+				"prompt.text": "Hello",
 			},
-			"active",
+			async (promptSpan) => {
+				// Tool call via startTracked (long-lived, start/end at different sites)
+				tracer.startTracked(
+					"tc-1",
+					"agent.tool_call",
+					{
+						"tool.call_id": "tc-1",
+						"tool.title": "Run tests",
+						"tool.kind": "execute",
+						"tool.command": "bun test",
+					},
+					"tool call",
+				);
+
+				// Permission via wrap() — nested inside tool call context
+				// (the tracked tool span is on top of the context stack)
+				await tracer.wrap(
+					"agent.permission",
+					{
+						"permission.tool_call_id": "tc-1",
+						"permission.tool_call_title": "Run tests",
+					},
+					async (permSpan) => {
+						permSpan.setAttribute("permission.outcome", "granted");
+						permSpan.setAttribute("permission.option_id", "opt-1");
+						permSpan.setAttribute("permission.option_name", "Allow");
+					},
+				);
+
+				// End tool call
+				const toolSpan = tracer.getTrackedSpan("tc-1");
+				if (toolSpan?.isRecording()) {
+					toolSpan.setAttribute("tool.status", "completed");
+					toolSpan.setAttribute("tool.exit_code", 0);
+				}
+				tracer.endTracked("tc-1");
+
+				// Context injection during prompt
+				tracer.recordEvent("context.injected", {
+					"context.instructions": "Add error handling",
+					"context.instructions_length": 18,
+					"context.queued": false,
+				});
+
+				// FS operation (scoped via wrap)
+				await tracer.wrap(
+					"agent.fs.read",
+					{
+						"fs.path": "/test.txt",
+						"fs.operation": "read",
+					},
+					async (span) => {
+						span.setAttribute("fs.content_length", 42);
+					},
+				);
+
+				// Terminal via startTracked
+				tracer.startTracked(
+					"t-1",
+					"agent.terminal",
+					{
+						"terminal.id": "t-1",
+						"terminal.command": "echo",
+						"terminal.cwd": "/tmp",
+					},
+					"terminal",
+				);
+
+				// End terminal
+				tracer.endTracked("t-1");
+
+				// Usage event
+				tracer.recordEvent("usage.update", {
+					"usage.context_used": 5000,
+					"usage.context_size": 10000,
+					"usage.context_percent": 50,
+				});
+
+				promptSpan.setAttribute("prompt.stop_reason", "end_turn");
+			},
 		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
-
-		// Permission via public API — parented under tool call span
-		const permSpan = tracer.startOperation(
-			"agent.permission",
-			{
-				"permission.tool_call_id": "tc-1",
-				"permission.tool_call_title": "Run tests",
-			},
-			toolSpan,
-		);
-		permSpan.setAttribute("permission.outcome", "granted");
-		permSpan.setAttribute("permission.option_id", "opt-1");
-		permSpan.setAttribute("permission.option_name", "Allow");
-		permSpan.setStatus({ code: SpanStatusCode.OK });
-		permSpan.end();
-
-		// End tool call
-		const removedToolSpan = tracer.removeTrackedSpan("tc-1");
-		if (removedToolSpan?.isRecording()) {
-			removedToolSpan.setAttribute("tool.status", "completed");
-			removedToolSpan.setAttribute("tool.exit_code", 0);
-			removedToolSpan.setStatus({ code: SpanStatusCode.OK });
-			removedToolSpan.end();
-		}
-
-		// Context injection during prompt — targets "active" span
-		tracer.recordEvent("active", "context.injected", {
-			"context.instructions": "Add error handling",
-			"context.instructions_length": 18,
-			"context.queued": false,
-		});
-
-		// FS operation
-		await tracer.traced(
-			"agent.fs.read",
-			async (span) => {
-				span.setAttribute("fs.content_length", 42);
-				return { content: "file data" };
-			},
-			{
-				attributes: {
-					"fs.path": "/test.txt",
-					"fs.operation": "read",
-				},
-				parent: "active",
-			},
-		);
-
-		// Terminal via public API
-		const termSpan = tracer.startOperation(
-			"agent.terminal",
-			{
-				"terminal.id": "t-1",
-				"terminal.command": "echo",
-				"terminal.cwd": "/tmp",
-			},
-			"active",
-		);
-		// TASK 9: args as native array
-		termSpan.setAttribute("terminal.args", ["hello"]);
-		tracer.trackSpan("t-1", termSpan, "terminal");
-
-		// End terminal
-		const removedTermSpan = tracer.removeTrackedSpan("t-1");
-		if (removedTermSpan?.isRecording()) {
-			removedTermSpan.setAttribute("terminal.exit_code", 0);
-			removedTermSpan.setStatus({ code: SpanStatusCode.OK });
-			removedTermSpan.end();
-		}
-
-		// Usage via public API — targets "active" span
-		tracer.recordEvent("active", "usage.update", {
-			"usage.context_used": 5000,
-			"usage.context_size": 10000,
-			"usage.context_percent": 50,
-		});
-
-		// End first prompt
-		if (p1.isRecording()) {
-			p1.setAttribute("prompt.stop_reason", "end_turn");
-		}
-		tracer.endActiveSpan(p1);
 
 		// Second prompt
-		const p2 = tracer.startActiveSpan("agent.prompt", {
-			"prompt.index": 2,
-		});
-		tracer.endActiveSpan(p2);
+		await tracer.wrap(
+			"agent.prompt",
+			{ "prompt.index": 2 },
+			async (_span) => {},
+		);
 
 		// Collect all spans
 		const allSpans = await shutdownAndCollect(tracer, exporter, provider);
@@ -983,7 +939,7 @@ describe("Tracer — Full Lifecycle", () => {
 		const prompts = allSpans.filter((s) => s.name === "agent.prompt");
 		expect(prompts).toHaveLength(2);
 
-		// TASK 13: Context injection event on the active span (not root)
+		// Context injection event on the prompt span (not root)
 		const promptSpan = allSpans
 			.filter((s) => s.name === "agent.prompt")
 			.find((s) => s.attributes["prompt.index"] === 1)!;
@@ -991,7 +947,6 @@ describe("Tracer — Full Lifecycle", () => {
 			(e) => e.name === "context.injected",
 		);
 		expect(ctxEvent).toBeDefined();
-		// TASK 11: context.queued is a boolean, not a string
 		expect(ctxEvent!.attributes!["context.queued"]).toBe(false);
 	});
 
@@ -999,28 +954,20 @@ describe("Tracer — Full Lifecycle", () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const init = tracer.startOperation("init", {}, "root");
-		tracer.endOperation(init);
+		await tracer.wrap("init", async () => {});
 
-		const active = tracer.startActiveSpan("test.active");
-
-		// Tool call via public API
-		const toolSpan = tracer.startOperation(
-			"agent.tool_call",
-			{
-				"tool.call_id": "tc-1",
-				"tool.title": "T",
-			},
-			"active",
-		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
-		const removed = tracer.removeTrackedSpan("tc-1");
-		if (removed?.isRecording()) {
-			removed.setStatus({ code: SpanStatusCode.OK });
-			removed.end();
-		}
-
-		tracer.endActiveSpan(active);
+		await tracer.wrap("test.prompt", async () => {
+			tracer.startTracked(
+				"tc-1",
+				"agent.tool_call",
+				{
+					"tool.call_id": "tc-1",
+					"tool.title": "T",
+				},
+				"tool call",
+			);
+			tracer.endTracked("tc-1");
+		});
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 		const traceIds = new Set(spans.map((s) => s.spanContext().traceId));
@@ -1031,20 +978,20 @@ describe("Tracer — Full Lifecycle", () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const init = tracer.startOperation("init", {}, "root");
-		const phase = tracer.startOperation("init.phase", {}, init);
-		tracer.endOperation(phase);
-		tracer.endOperation(init);
-
-		const active = tracer.startActiveSpan("test.active");
-		await tracer.traced("custom.op", async () => "ok", {
-			attributes: {
-				"fs.path": "/test",
-				"fs.operation": "read",
-			},
-			parent: "active",
+		await tracer.wrap("init", async () => {
+			await tracer.wrap("init.phase", async () => {});
 		});
-		tracer.endActiveSpan(active);
+
+		await tracer.wrap("test.prompt", async () => {
+			await tracer.wrap(
+				"custom.op",
+				{
+					"fs.path": "/test",
+					"fs.operation": "read",
+				},
+				async () => {},
+			);
+		});
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 
@@ -1061,41 +1008,36 @@ describe("Tracer — Full Lifecycle", () => {
 	it("tool call and permission share the same parent-child chain", async () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		tracer.startActiveSpan("test.active");
 
-		// Tool call via public API
-		const toolSpan = tracer.startOperation(
-			"agent.tool_call",
-			{
-				"tool.call_id": "tc-1",
-				"tool.title": "Run cmd",
-				"tool.kind": "execute",
-			},
-			"active",
-		);
-		tracer.trackSpan("tc-1", toolSpan, "tool call");
+		await tracer.wrap("test.prompt", async () => {
+			// Tool call via startTracked
+			tracer.startTracked(
+				"tc-1",
+				"agent.tool_call",
+				{
+					"tool.call_id": "tc-1",
+					"tool.title": "Run cmd",
+					"tool.kind": "execute",
+				},
+				"tool call",
+			);
 
-		// Permission as child of tool call span
-		const permSpan = tracer.startOperation(
-			"agent.permission",
-			{
-				"permission.tool_call_id": "tc-1",
-				"permission.tool_call_title": "Run cmd",
-			},
-			toolSpan,
-		);
-		permSpan.setAttribute("permission.outcome", "granted");
-		permSpan.setAttribute("permission.option_id", "opt-1");
-		permSpan.setAttribute("permission.option_name", "Allow");
-		permSpan.setStatus({ code: SpanStatusCode.OK });
-		permSpan.end();
+			// Permission is created inside the tracked tool call context,
+			// so it becomes a child of the tool call span
+			await tracer.wrap(
+				"agent.permission",
+				{
+					"permission.tool_call_id": "tc-1",
+					"permission.tool_call_title": "Run cmd",
+				},
+				async (permSpan) => {
+					permSpan.setAttribute("permission.outcome", "granted");
+				},
+			);
 
-		// End tool call
-		const removedTool = tracer.removeTrackedSpan("tc-1");
-		if (removedTool?.isRecording()) {
-			removedTool.setStatus({ code: SpanStatusCode.OK });
-			removedTool.end();
-		}
+			// End tool call
+			tracer.endTracked("tc-1");
+		});
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 
@@ -1111,8 +1053,7 @@ describe("Tracer — Full Lifecycle", () => {
 		const { tracer, exporter, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const init = tracer.startOperation("init", {}, "root");
-		tracer.endOperation(init);
+		await tracer.wrap("init", async () => {});
 
 		const spans = await shutdownAndCollect(tracer, exporter, provider);
 
@@ -1121,43 +1062,20 @@ describe("Tracer — Full Lifecycle", () => {
 			expect(span.spanContext().traceId.length).toBe(32);
 		}
 	});
-
-	it("error in one active span does not affect the next", async () => {
-		const { tracer, exporter, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-
-		// First active span — error
-		const a1 = tracer.startActiveSpan("active.1");
-		tracer.endActiveSpan(a1, new Error("failed"));
-
-		// Second active span — success
-		const a2 = tracer.startActiveSpan("active.2");
-		tracer.endActiveSpan(a2);
-
-		const spans = await shutdownAndCollect(tracer, exporter, provider);
-
-		const actives = spans.filter((s) => s.name.startsWith("active."));
-		expect(actives).toHaveLength(2);
-
-		const first = actives.find((s) => s.name === "active.1")!;
-		const second = actives.find((s) => s.name === "active.2")!;
-		expect(first.status.code).toBe(SpanStatusCode.ERROR);
-		expect(second.status.code).toBe(SpanStatusCode.OK);
-	});
 });
 
-// ── Trace Context ──────────────────────────────────────────────────────────
+// ── Context (getContext) ───────────────────────────────────────────────────
 
-describe("Tracer — Trace Context", () => {
+describe("Tracer — Context", () => {
 	it("returns undefined when tracing is disabled", () => {
 		const tracer = new Tracer({ enabled: false });
-		expect(tracer.getTraceContext()).toBeUndefined();
+		expect(tracer.getContext()).toBeUndefined();
 	});
 
 	it("returns undefined when no root span is started", () => {
 		const { provider } = createTestProvider();
 		const tracer = new Tracer({ enabled: true, provider });
-		expect(tracer.getTraceContext()).toBeUndefined();
+		expect(tracer.getContext()).toBeUndefined();
 		provider.shutdown();
 	});
 
@@ -1165,7 +1083,7 @@ describe("Tracer — Trace Context", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const ctx = tracer.getTraceContext();
+		const ctx = tracer.getContext();
 		expect(ctx).toBeDefined();
 		expect(ctx!.TraceId).toBeDefined();
 		expect(ctx!.TraceId.length).toBe(32);
@@ -1180,292 +1098,326 @@ describe("Tracer — Trace Context", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
 
-		const ctx = tracer.getTraceContext()!;
+		const ctx = tracer.getContext()!;
 		expect(ctx.ParentSpanId).toBeUndefined();
 
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("returns active span context when active span is set", () => {
+	it("wrap() sets context to the wrapped span during callback", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
+		const rootCtx = tracer.getContext()!;
 
-		const rootCtx = tracer.getTraceContext()!;
+		tracer.wrapSync("test.operation", (span) => {
+			const innerCtx = tracer.getContext()!;
 
-		const active = tracer.startActiveSpan("test.active");
-		const activeCtx = tracer.getTraceContext()!;
+			// TraceId should be the same
+			expect(innerCtx.TraceId).toBe(rootCtx.TraceId);
+			// SpanId should be the operation span, not root
+			expect(innerCtx.SpanId).not.toBe(rootCtx.SpanId);
+			expect(innerCtx.SpanId).toBe(span.spanContext().spanId);
+			// ParentSpanId should point to root span
+			expect(innerCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		});
 
-		// TraceId should be the same
-		expect(activeCtx.TraceId).toBe(rootCtx.TraceId);
-		// SpanId should be different (active span vs root span)
-		expect(activeCtx.SpanId).not.toBe(rootCtx.SpanId);
-
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("active span ParentSpanId points to root span", () => {
+	it("context reverts after wrap() completes", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
+		const rootCtx = tracer.getContext()!;
 
-		const rootCtx = tracer.getTraceContext()!;
+		tracer.wrapSync("test.operation", (_span) => {});
 
-		const active = tracer.startActiveSpan("test.active");
-		const activeCtx = tracer.getTraceContext()!;
-
-		expect(activeCtx.ParentSpanId).toBe(rootCtx.SpanId);
-
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("falls back to root span context after active span ends", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const active = tracer.startActiveSpan("test.active");
-		tracer.endActiveSpan(active);
-
-		const afterCtx = tracer.getTraceContext()!;
+		// After wrapSync completes, context should be back to root
+		const afterCtx = tracer.getContext()!;
 		expect(afterCtx.SpanId).toBe(rootCtx.SpanId);
 
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	// ── enterSpan / leaveSpan ──────────────────────────────────────────
-
-	it("enterSpan makes a span the current context for getTraceContext", () => {
+	it("nested wrap() produces correct ParentSpanId chain", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-		const activeCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		const opSpan = tracer.startOperation("test.tool_call", {}, "active");
-		tracer.enterSpan(opSpan);
+		tracer.wrapSync("test.prompt", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+			expect(promptCtx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		const opCtx = tracer.getTraceContext()!;
-		// SpanId should be the operation span, not the active span
-		expect(opCtx.SpanId).not.toBe(activeCtx.SpanId);
-		// ParentSpanId should point to the active (prompt) span
-		expect(opCtx.ParentSpanId).toBe(activeCtx.SpanId);
-		// TraceId stays the same
-		expect(opCtx.TraceId).toBe(activeCtx.TraceId);
+			tracer.wrapSync("test.tool_call", (_toolSpan) => {
+				const toolCtx = tracer.getContext()!;
+				expect(toolCtx.ParentSpanId).toBe(promptCtx.SpanId);
 
-		tracer.leaveSpan(opSpan);
-		tracer.endOperation(opSpan);
-		tracer.endActiveSpan(active);
+				tracer.wrapSync("test.permission", (_permSpan) => {
+					const permCtx = tracer.getContext()!;
+					expect(permCtx.ParentSpanId).toBe(toolCtx.SpanId);
+				});
+
+				// After permission returns, back to tool context
+				expect(tracer.getContext()!.SpanId).toBe(toolCtx.SpanId);
+			});
+
+			// After tool call returns, back to prompt context
+			expect(tracer.getContext()!.SpanId).toBe(promptCtx.SpanId);
+		});
+
+		// After prompt returns, back to root context
+		expect(tracer.getContext()!.SpanId).toBe(rootCtx.SpanId);
+
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("leaveSpan restores previous context", () => {
+	it("tracked span affects context resolution", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-		const activeCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		const opSpan = tracer.startOperation("test.tool_call", {}, "active");
-		tracer.enterSpan(opSpan);
-		tracer.leaveSpan(opSpan);
-
-		// After leaving, context falls back to active span
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endOperation(opSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("nested enterSpan produces correct ParentSpanId chain", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-		const activeCtx = tracer.getTraceContext()!;
-
-		// Tool call span (child of active)
-		const toolSpan = tracer.startOperation("test.tool_call", {}, "active");
-		tracer.enterSpan(toolSpan);
-		const toolCtx = tracer.getTraceContext()!;
-		expect(toolCtx.ParentSpanId).toBe(activeCtx.SpanId);
-
-		// Permission span (child of tool call)
-		const permSpan = tracer.startOperation("test.permission", {}, toolSpan);
-		tracer.enterSpan(permSpan);
-		const permCtx = tracer.getTraceContext()!;
-		expect(permCtx.ParentSpanId).toBe(toolCtx.SpanId);
-
-		// Leave permission → back to tool call
-		tracer.leaveSpan(permSpan);
-		const afterPermCtx = tracer.getTraceContext()!;
-		expect(afterPermCtx.SpanId).toBe(toolCtx.SpanId);
-
-		// Leave tool call → back to active
-		tracer.leaveSpan(toolSpan);
-		const afterToolCtx = tracer.getTraceContext()!;
-		expect(afterToolCtx.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endOperation(permSpan);
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("enterSpan silently ignores non-recording spans", () => {
-		const disabledTracer = new Tracer({ enabled: false });
-		const noopSpan = disabledTracer.startRootSpan("noop");
-		// Should not throw
-		disabledTracer.enterSpan(noopSpan);
-		disabledTracer.leaveSpan(noopSpan);
-	});
-
-	it("enterSpan prevents duplicate entries", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-
-		const opSpan = tracer.startOperation("test.op", {}, "active");
-		tracer.enterSpan(opSpan);
-		tracer.enterSpan(opSpan); // duplicate — should be a no-op
-
-		const ctx = tracer.getTraceContext()!;
-		// Should still have the op span
-		expect(ctx.SpanId).toBe(tracer.getTraceContext()!.SpanId); // self-check (same call)
-		// A single leaveSpan should fully remove it
-		tracer.leaveSpan(opSpan);
-		const afterCtx = tracer.getTraceContext()!;
-		// Falls back to active span (not stuck on opSpan)
-		const activeCtx = active.spanContext();
-		expect(afterCtx.SpanId).toBe(activeCtx.spanId);
-
-		tracer.endOperation(opSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("leaveSpan is a no-op for unknown spans", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const opSpan = tracer.startOperation("test.op", {}, "root");
-		// Never entered — leaveSpan should not throw
-		tracer.leaveSpan(opSpan);
-
-		const ctx = tracer.getTraceContext()!;
-		expect(ctx.SpanId).toBe(rootCtx.SpanId);
-
-		tracer.endOperation(opSpan);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("traced() auto-enters and auto-leaves the span", async () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-		const activeCtx = tracer.getTraceContext()!;
-
-		let capturedCtx: ReturnType<typeof tracer.getTraceContext>;
-		await tracer.traced(
-			"test.fs.read",
-			async (_span) => {
-				capturedCtx = tracer.getTraceContext();
-				return "data";
-			},
-			{ parent: "active" },
+		const trackedSpan = tracer.startTracked(
+			"tc-1",
+			"tool_call",
+			{ "tool.call_id": "tc-1" },
+			"tool call",
 		);
 
-		// Inside traced(), the context should have been the fs.read span
-		expect(capturedCtx!).toBeDefined();
-		expect(capturedCtx!.SpanId).not.toBe(activeCtx.SpanId);
-		expect(capturedCtx!.ParentSpanId).toBe(activeCtx.SpanId);
+		const trackedCtx = tracer.getContext()!;
+		expect(trackedCtx.SpanId).toBe(trackedSpan.spanContext().spanId);
+		expect(trackedCtx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		// After traced(), context should be back to active
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
+		tracer.endTracked("tc-1");
 
-		tracer.endActiveSpan(active);
+		// After endTracked, context falls back to root
+		const afterCtx = tracer.getContext()!;
+		expect(afterCtx.SpanId).toBe(rootCtx.SpanId);
+
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("tracedSync() auto-enters and auto-leaves the span", () => {
+	it("wrap() auto-enters and auto-leaves the span for context", async () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		const active = tracer.startActiveSpan("test.prompt");
-		const activeCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		let capturedCtx: ReturnType<typeof tracer.getTraceContext>;
-		tracer.tracedSync(
-			"test.json.parse",
-			(_span) => {
-				capturedCtx = tracer.getTraceContext();
-				return { key: "value" };
-			},
-			{ parent: "active" },
-		);
+		let capturedCtx: ReturnType<typeof tracer.getContext>;
+		await tracer.wrap("test.fs.read", async (_span) => {
+			capturedCtx = tracer.getContext();
+		});
 
-		// Inside tracedSync(), the context should have been the parse span
+		// Inside wrap(), the context should have been the fs.read span
 		expect(capturedCtx!).toBeDefined();
-		expect(capturedCtx!.SpanId).not.toBe(activeCtx.SpanId);
-		expect(capturedCtx!.ParentSpanId).toBe(activeCtx.SpanId);
+		expect(capturedCtx!.SpanId).not.toBe(rootCtx.SpanId);
+		expect(capturedCtx!.ParentSpanId).toBe(rootCtx.SpanId);
 
-		// After tracedSync(), context should be back to active
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
+		// After wrap(), context should be back to root
+		const afterCtx = tracer.getContext()!;
+		expect(afterCtx.SpanId).toBe(rootCtx.SpanId);
 
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("flush clears the span stack", async () => {
+	it("wrapSync() auto-enters and auto-leaves the span for context", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("test.session");
+		const rootCtx = tracer.getContext()!;
+
+		let capturedCtx: ReturnType<typeof tracer.getContext>;
+		tracer.wrapSync("test.json.parse", (_span) => {
+			capturedCtx = tracer.getContext();
+			return { key: "value" };
+		});
+
+		// Inside wrapSync(), the context should have been the parse span
+		expect(capturedCtx!).toBeDefined();
+		expect(capturedCtx!.SpanId).not.toBe(rootCtx.SpanId);
+		expect(capturedCtx!.ParentSpanId).toBe(rootCtx.SpanId);
+
+		// After wrapSync(), context should be back to root
+		const afterCtx = tracer.getContext()!;
+		expect(afterCtx.SpanId).toBe(rootCtx.SpanId);
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("flush ends root span so getContext returns undefined", async () => {
 		const { tracer } = createTestTracer();
 		tracer.startRootSpan("test.session");
-		const _active = tracer.startActiveSpan("test.prompt");
 
-		const opSpan = tracer.startOperation("test.op", {}, "active");
-		tracer.enterSpan(opSpan);
-
-		// Flush ends lingering spans and clears the stack
+		// Flush ends lingering spans and root span
 		await tracer.flush();
 
-		// After flush, getTraceContext returns undefined (root span ended)
-		expect(tracer.getTraceContext()).toBeUndefined();
+		// After flush, getContext returns undefined (root span ended)
+		expect(tracer.getContext()).toBeUndefined();
 
 		await tracer.shutdown();
 	});
 
-	it("operation span ParentSpanId tracks the resolved parent", () => {
+	it("deeply nested wrapSync (4 levels) produces correct ParentSpanId chain", () => {
 		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("test.session");
-		const rootCtx = tracer.getTraceContext()!;
+		tracer.startRootSpan("session");
+		const rootCtx = tracer.getContext()!;
 
-		// Operation parented under root
-		const initSpan = tracer.startOperation("test.init", {}, "root");
-		tracer.enterSpan(initSpan);
-		const initCtx = tracer.getTraceContext()!;
-		expect(initCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		tracer.wrapSync("level.1", (_span) => {
+			const l1Ctx = tracer.getContext()!;
+			expect(l1Ctx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		// Sub-operation parented under explicit span
-		const subSpan = tracer.startOperation("test.init.sub", {}, initSpan);
-		tracer.enterSpan(subSpan);
-		const subCtx = tracer.getTraceContext()!;
-		expect(subCtx.ParentSpanId).toBe(initCtx.SpanId);
+			tracer.wrapSync("level.2", (_span) => {
+				const l2Ctx = tracer.getContext()!;
+				expect(l2Ctx.ParentSpanId).toBe(l1Ctx.SpanId);
 
-		tracer.leaveSpan(subSpan);
-		tracer.endOperation(subSpan);
-		tracer.leaveSpan(initSpan);
-		tracer.endOperation(initSpan);
+				tracer.wrapSync("level.3", (_span) => {
+					const l3Ctx = tracer.getContext()!;
+					expect(l3Ctx.ParentSpanId).toBe(l2Ctx.SpanId);
+
+					tracer.wrapSync("level.4", (_span) => {
+						const l4Ctx = tracer.getContext()!;
+						expect(l4Ctx.ParentSpanId).toBe(l3Ctx.SpanId);
+					});
+
+					// Back to level 3
+					expect(tracer.getContext()!.SpanId).toBe(l3Ctx.SpanId);
+				});
+
+				// Back to level 2
+				expect(tracer.getContext()!.SpanId).toBe(l2Ctx.SpanId);
+			});
+
+			// Back to level 1
+			expect(tracer.getContext()!.SpanId).toBe(l1Ctx.SpanId);
+		});
+
+		// Back to root
+		expect(tracer.getContext()!.SpanId).toBe(rootCtx.SpanId);
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("nested wrap() calls produce correct ParentSpanId at each level", async () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+		const rootCtx = tracer.getContext()!;
+
+		let outerCtx: ReturnType<typeof tracer.getContext>;
+		let innerCtx: ReturnType<typeof tracer.getContext>;
+
+		await tracer.wrap("outer.op", async (_outerSpan) => {
+			outerCtx = tracer.getContext();
+			await tracer.wrap("inner.op", async (_innerSpan) => {
+				innerCtx = tracer.getContext();
+			});
+		});
+
+		// Outer is child of root
+		expect(outerCtx!.ParentSpanId).toBe(rootCtx.SpanId);
+		// Inner is child of outer
+		expect(innerCtx!.ParentSpanId).toBe(outerCtx!.SpanId);
+		// All three have distinct SpanIds
+		expect(
+			new Set([rootCtx.SpanId, outerCtx!.SpanId, innerCtx!.SpanId]).size,
+		).toBe(3);
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("wrapSync() that throws still restores context correctly", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+		const rootCtx = tracer.getContext()!;
+
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+
+			try {
+				tracer.wrapSync("failing.op", (_span) => {
+					const ctx = tracer.getContext()!;
+					// Inside, ParentSpanId should point to prompt
+					expect(ctx.ParentSpanId).toBe(promptCtx.SpanId);
+					throw new Error("boom");
+				});
+			} catch {
+				// expected
+			}
+
+			// After the throw, context is back to prompt
+			const afterCtx = tracer.getContext()!;
+			expect(afterCtx.SpanId).toBe(promptCtx.SpanId);
+		});
+
+		// Back to root
+		expect(tracer.getContext()!.SpanId).toBe(rootCtx.SpanId);
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("wrap() that throws still restores context correctly", async () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+		const rootCtx = tracer.getContext()!;
+
+		await tracer.wrap("prompt.1", async (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+
+			try {
+				await tracer.wrap("async.failing.op", async (_span) => {
+					const ctx = tracer.getContext()!;
+					expect(ctx.ParentSpanId).toBe(promptCtx.SpanId);
+					throw new Error("async boom");
+				});
+			} catch {
+				// expected
+			}
+
+			const afterCtx = tracer.getContext()!;
+			expect(afterCtx.SpanId).toBe(promptCtx.SpanId);
+		});
+
+		expect(tracer.getContext()!.SpanId).toBe(rootCtx.SpanId);
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("simulated terminal span lifecycle has correct context", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+
+			// Start a terminal span (child of prompt via tracked context)
+			const termSpan = tracer.startTracked(
+				"term_1",
+				"terminal",
+				{
+					"terminal.id": "term_1",
+					"terminal.command": "ls -la",
+				},
+				"terminal",
+			);
+
+			const termCtx = tracer.getContext()!;
+			expect(termCtx.SpanId).toBe(termSpan.spanContext().spanId);
+			expect(termCtx.ParentSpanId).toBe(promptCtx.SpanId);
+
+			// Terminal exits — end tracked
+			tracer.endTracked("term_1");
+
+			// Back to prompt (the wrap context, since tracked span is removed)
+			const afterCtx = tracer.getContext()!;
+			expect(afterCtx.SpanId).toBe(promptCtx.SpanId);
+		});
+
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
@@ -1478,7 +1430,7 @@ describe("Tracer — ParentSpanId", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
 
-		const ctx = tracer.getTraceContext()!;
+		const ctx = tracer.getContext()!;
 		expect(ctx).toBeDefined();
 		expect(ctx.ParentSpanId).toBeUndefined();
 
@@ -1486,18 +1438,17 @@ describe("Tracer — ParentSpanId", () => {
 		provider.shutdown();
 	});
 
-	it("active span ParentSpanId points to root span SpanId", () => {
+	it("wrap span ParentSpanId points to root span SpanId", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
+		tracer.wrapSync("prompt.1", (_span) => {
+			const wrapCtx = tracer.getContext()!;
+			expect(wrapCtx.ParentSpanId).toBeDefined();
+			expect(wrapCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		});
 
-		expect(activeCtx.ParentSpanId).toBeDefined();
-		expect(activeCtx.ParentSpanId).toBe(rootCtx.SpanId);
-
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
@@ -1506,543 +1457,208 @@ describe("Tracer — ParentSpanId", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
 
-		const active = tracer.startActiveSpan("prompt.1");
-		const ctx = tracer.getTraceContext()!;
+		tracer.wrapSync("prompt.1", (_span) => {
+			const ctx = tracer.getContext()!;
+			expect(ctx.ParentSpanId).toBeDefined();
+			expect(ctx.ParentSpanId!.length).toBe(16);
+			expect(ctx.ParentSpanId).toMatch(/^[0-9a-f]{16}$/);
+		});
 
-		expect(ctx.ParentSpanId).toBeDefined();
-		expect(ctx.ParentSpanId!.length).toBe(16);
-		expect(ctx.ParentSpanId).toMatch(/^[0-9a-f]{16}$/);
-
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("operation parented under 'active' has ParentSpanId equal to active span", () => {
+	it("nested wrap produces correct parent chain", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		const opSpan = tracer.startOperation("tool_call", {}, "active");
-		tracer.enterSpan(opSpan);
-		const opCtx = tracer.getTraceContext()!;
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+			expect(promptCtx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		expect(opCtx.ParentSpanId).toBe(activeCtx.SpanId);
+			tracer.wrapSync("tool_call", (_toolSpan) => {
+				const toolCtx = tracer.getContext()!;
+				expect(toolCtx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
+		});
 
-		tracer.leaveSpan(opSpan);
-		tracer.endOperation(opSpan);
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("operation parented under 'root' has ParentSpanId equal to root span", () => {
+	it("full chain: root → wrap → wrap → wrap produces correct ParentSpanId at every level", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const active = tracer.startActiveSpan("prompt.1");
-
-		const opSpan = tracer.startOperation("init.phase", {}, "root");
-		tracer.enterSpan(opSpan);
-		const opCtx = tracer.getTraceContext()!;
-
-		expect(opCtx.ParentSpanId).toBe(rootCtx.SpanId);
-
-		tracer.leaveSpan(opSpan);
-		tracer.endOperation(opSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("operation parented under explicit span has ParentSpanId equal to that span", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-
-		const toolSpan = tracer.startOperation("tool_call", {}, "active");
-		tracer.enterSpan(toolSpan);
-		const toolCtx = tracer.getTraceContext()!;
-
-		const permSpan = tracer.startOperation("permission", {}, toolSpan);
-		tracer.enterSpan(permSpan);
-		const permCtx = tracer.getTraceContext()!;
-
-		expect(permCtx.ParentSpanId).toBe(toolCtx.SpanId);
-
-		tracer.leaveSpan(permSpan);
-		tracer.endOperation(permSpan);
-		tracer.leaveSpan(toolSpan);
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("full chain: root → active → tool → permission produces correct ParentSpanId at every level", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 		expect(rootCtx.ParentSpanId).toBeUndefined();
 
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-		expect(activeCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+			expect(promptCtx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		const toolSpan = tracer.startOperation(
-			"tool_call",
-			{
-				"tool.call_id": "tc_1",
-			},
-			"active",
-		);
-		tracer.enterSpan(toolSpan);
-		const toolCtx = tracer.getTraceContext()!;
-		expect(toolCtx.ParentSpanId).toBe(activeCtx.SpanId);
+			tracer.wrapSync("tool_call", { "tool.call_id": "tc_1" }, (_toolSpan) => {
+				const toolCtx = tracer.getContext()!;
+				expect(toolCtx.ParentSpanId).toBe(promptCtx.SpanId);
 
-		const permSpan = tracer.startOperation(
-			"permission",
-			{
-				"permission.tool_call_id": "tc_1",
-			},
-			toolSpan,
-		);
-		tracer.enterSpan(permSpan);
-		const permCtx = tracer.getTraceContext()!;
-		expect(permCtx.ParentSpanId).toBe(toolCtx.SpanId);
+				tracer.wrapSync(
+					"permission",
+					{ "permission.tool_call_id": "tc_1" },
+					(_permSpan) => {
+						const permCtx = tracer.getContext()!;
+						expect(permCtx.ParentSpanId).toBe(toolCtx.SpanId);
 
-		// All share the same TraceId
-		expect(activeCtx.TraceId).toBe(rootCtx.TraceId);
-		expect(toolCtx.TraceId).toBe(rootCtx.TraceId);
-		expect(permCtx.TraceId).toBe(rootCtx.TraceId);
+						// All share the same TraceId
+						expect(promptCtx.TraceId).toBe(rootCtx.TraceId);
+						expect(toolCtx.TraceId).toBe(rootCtx.TraceId);
+						expect(permCtx.TraceId).toBe(rootCtx.TraceId);
 
-		// All SpanIds are distinct
-		const ids = [
-			rootCtx.SpanId,
-			activeCtx.SpanId,
-			toolCtx.SpanId,
-			permCtx.SpanId,
-		];
-		expect(new Set(ids).size).toBe(4);
-
-		tracer.leaveSpan(permSpan);
-		tracer.endOperation(permSpan);
-		tracer.leaveSpan(toolSpan);
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("leaveSpan restores ParentSpanId to the parent of the span we fall back to", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		const toolSpan = tracer.startOperation("tool_call", {}, "active");
-		tracer.enterSpan(toolSpan);
-
-		const permSpan = tracer.startOperation("permission", {}, toolSpan);
-		tracer.enterSpan(permSpan);
-
-		// Leave permission → context is tool, ParentSpanId is active
-		tracer.leaveSpan(permSpan);
-		const afterPermCtx = tracer.getTraceContext()!;
-		expect(afterPermCtx.SpanId).toBe(tracer.getTraceContext()!.SpanId);
-		expect(afterPermCtx.ParentSpanId).toBe(activeCtx.SpanId);
-
-		// Leave tool → context is active, ParentSpanId is root
-		tracer.leaveSpan(toolSpan);
-		const afterToolCtx = tracer.getTraceContext()!;
-		expect(afterToolCtx.SpanId).toBe(activeCtx.SpanId);
-		expect(afterToolCtx.ParentSpanId).toBe(rootCtx.SpanId);
-
-		tracer.endOperation(permSpan);
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("endActiveSpan falls back to root which has no ParentSpanId", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const active = tracer.startActiveSpan("prompt.1");
-		tracer.endActiveSpan(active);
-
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(rootCtx.SpanId);
-		expect(afterCtx.ParentSpanId).toBeUndefined();
-
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("sequential active spans each have ParentSpanId pointing to root", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const a1 = tracer.startActiveSpan("prompt.1");
-		const a1Ctx = tracer.getTraceContext()!;
-		expect(a1Ctx.ParentSpanId).toBe(rootCtx.SpanId);
-		tracer.endActiveSpan(a1);
-
-		const a2 = tracer.startActiveSpan("prompt.2");
-		const a2Ctx = tracer.getTraceContext()!;
-		expect(a2Ctx.ParentSpanId).toBe(rootCtx.SpanId);
-		// Different SpanIds for the two active spans
-		expect(a2Ctx.SpanId).not.toBe(a1Ctx.SpanId);
-		tracer.endActiveSpan(a2);
-
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("ParentSpanId is stable across consecutive getTraceContext calls", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-
-		const toolSpan = tracer.startOperation("tool_call", {}, "active");
-		tracer.enterSpan(toolSpan);
-
-		const ctx1 = tracer.getTraceContext()!;
-		const ctx2 = tracer.getTraceContext()!;
-		const ctx3 = tracer.getTraceContext()!;
-
-		expect(ctx1.ParentSpanId).toBe(ctx2.ParentSpanId);
-		expect(ctx2.ParentSpanId).toBe(ctx3.ParentSpanId);
-		expect(ctx1.SpanId).toBe(ctx2.SpanId);
-		expect(ctx2.SpanId).toBe(ctx3.SpanId);
-
-		tracer.leaveSpan(toolSpan);
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("tracked span entered via enterSpan has correct ParentSpanId", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		// Simulate a tool call span tracked by ID (as agent code does)
-		const toolSpan = tracer.startOperation(
-			"tool_call",
-			{
-				"tool.call_id": "tc_42",
-			},
-			"active",
-		);
-		tracer.trackSpan("tc_42", toolSpan, "tool_call:tc_42");
-		tracer.enterSpan(toolSpan);
-
-		const toolCtx = tracer.getTraceContext()!;
-		expect(toolCtx.ParentSpanId).toBe(activeCtx.SpanId);
-		expect(toolCtx.SpanId).not.toBe(activeCtx.SpanId);
-
-		// Remove tracked span and leave
-		const removed = tracer.removeTrackedSpan("tc_42");
-		expect(removed).toBe(toolSpan);
-		tracer.leaveSpan(toolSpan);
-
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-		expect(afterCtx.ParentSpanId).toBe(tracer.getTraceContext()!.ParentSpanId);
-
-		tracer.endOperation(toolSpan);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("out-of-order leaveSpan preserves correct ParentSpanId", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		const span1 = tracer.startOperation("op.1", {}, "active");
-		tracer.enterSpan(span1);
-		const span1Ctx = tracer.getTraceContext()!;
-
-		const span2 = tracer.startOperation("op.2", {}, span1);
-		tracer.enterSpan(span2);
-		const span2Ctx = tracer.getTraceContext()!;
-
-		expect(span2Ctx.ParentSpanId).toBe(span1Ctx.SpanId);
-
-		// Leave span1 first (out of order — span2 is still on top)
-		tracer.leaveSpan(span1);
-		// span2 is now on top of stack, ParentSpanId still points to span1
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(span2Ctx.SpanId);
-		expect(afterCtx.ParentSpanId).toBe(span1Ctx.SpanId);
-
-		// Now leave span2 → fall back to active
-		tracer.leaveSpan(span2);
-		const finalCtx = tracer.getTraceContext()!;
-		expect(finalCtx.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endOperation(span2);
-		tracer.endOperation(span1);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("deeply nested spans (4 levels) produce correct ParentSpanId chain", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
-
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		const level1 = tracer.startOperation("level.1", {}, "active");
-		tracer.enterSpan(level1);
-		const l1Ctx = tracer.getTraceContext()!;
-
-		const level2 = tracer.startOperation("level.2", {}, level1);
-		tracer.enterSpan(level2);
-		const l2Ctx = tracer.getTraceContext()!;
-
-		const level3 = tracer.startOperation("level.3", {}, level2);
-		tracer.enterSpan(level3);
-		const l3Ctx = tracer.getTraceContext()!;
-
-		const level4 = tracer.startOperation("level.4", {}, level3);
-		tracer.enterSpan(level4);
-		const l4Ctx = tracer.getTraceContext()!;
-
-		// Verify the full chain
-		expect(activeCtx.ParentSpanId).toBe(rootCtx.SpanId);
-		expect(l1Ctx.ParentSpanId).toBe(activeCtx.SpanId);
-		expect(l2Ctx.ParentSpanId).toBe(l1Ctx.SpanId);
-		expect(l3Ctx.ParentSpanId).toBe(l2Ctx.SpanId);
-		expect(l4Ctx.ParentSpanId).toBe(l3Ctx.SpanId);
-
-		// Unwind and verify at each step
-		tracer.leaveSpan(level4);
-		expect(tracer.getTraceContext()!.SpanId).toBe(l3Ctx.SpanId);
-
-		tracer.leaveSpan(level3);
-		expect(tracer.getTraceContext()!.SpanId).toBe(l2Ctx.SpanId);
-
-		tracer.leaveSpan(level2);
-		expect(tracer.getTraceContext()!.SpanId).toBe(l1Ctx.SpanId);
-
-		tracer.leaveSpan(level1);
-		expect(tracer.getTraceContext()!.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endOperation(level4);
-		tracer.endOperation(level3);
-		tracer.endOperation(level2);
-		tracer.endOperation(level1);
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("traced() provides correct ParentSpanId inside the callback", async () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		let innerCtx: ReturnType<typeof tracer.getTraceContext>;
-		await tracer.traced(
-			"fs.read",
-			async (_span) => {
-				innerCtx = tracer.getTraceContext();
-				return "content";
-			},
-			{ parent: "active" },
-		);
-
-		expect(innerCtx!).toBeDefined();
-		expect(innerCtx!.ParentSpanId).toBe(activeCtx.SpanId);
-
-		// After traced() completes, ParentSpanId reverts
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("tracedSync() provides correct ParentSpanId inside the callback", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		let innerCtx: ReturnType<typeof tracer.getTraceContext>;
-		tracer.tracedSync(
-			"json.parse",
-			(_span) => {
-				innerCtx = tracer.getTraceContext();
-				return { ok: true };
-			},
-			{ parent: "active" },
-		);
-
-		expect(innerCtx!).toBeDefined();
-		expect(innerCtx!.ParentSpanId).toBe(activeCtx.SpanId);
-
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
-
-	it("nested traced() calls produce correct ParentSpanId at each level", async () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-
-		let outerCtx: ReturnType<typeof tracer.getTraceContext>;
-		let innerCtx: ReturnType<typeof tracer.getTraceContext>;
-
-		await tracer.traced(
-			"outer.op",
-			async (outerSpan) => {
-				outerCtx = tracer.getTraceContext();
-				await tracer.traced(
-					"inner.op",
-					async (_innerSpan) => {
-						innerCtx = tracer.getTraceContext();
-						return "deep";
+						// All SpanIds are distinct
+						const ids = [
+							rootCtx.SpanId,
+							promptCtx.SpanId,
+							toolCtx.SpanId,
+							permCtx.SpanId,
+						];
+						expect(new Set(ids).size).toBe(4);
 					},
-					{ parent: outerSpan },
 				);
-				return "shallow";
-			},
-			{ parent: "active" },
-		);
+			});
+		});
 
-		// Outer is child of active
-		expect(outerCtx!.ParentSpanId).toBe(activeCtx.SpanId);
-		// Inner is child of outer
-		expect(innerCtx!.ParentSpanId).toBe(outerCtx!.SpanId);
-		// All three have distinct SpanIds
-		expect(
-			new Set([activeCtx.SpanId, outerCtx!.SpanId, innerCtx!.SpanId]).size,
-		).toBe(3);
-
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("tracedSync() that throws still restores ParentSpanId correctly", () => {
+	it("context correctly reverts at each level after wrapSync", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 
-		try {
-			tracer.tracedSync(
-				"failing.op",
-				(_span) => {
-					const ctx = tracer.getTraceContext()!;
-					// Inside, ParentSpanId should point to active
-					expect(ctx.ParentSpanId).toBe(activeCtx.SpanId);
-					throw new Error("boom");
-				},
-				{ parent: "active" },
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+
+			tracer.wrapSync("tool_call", (_toolSpan) => {
+				tracer.wrapSync("permission", (_permSpan) => {});
+
+				// After permission, back to tool context
+				const afterPermCtx = tracer.getContext()!;
+				expect(afterPermCtx.SpanId).toBe(tracer.getContext()!.SpanId);
+				expect(afterPermCtx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
+
+			// After tool call, back to prompt context
+			const afterToolCtx = tracer.getContext()!;
+			expect(afterToolCtx.SpanId).toBe(promptCtx.SpanId);
+			expect(afterToolCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		});
+
+		// After prompt, back to root
+		const afterAll = tracer.getContext()!;
+		expect(afterAll.SpanId).toBe(rootCtx.SpanId);
+		expect(afterAll.ParentSpanId).toBeUndefined();
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("sequential wrap spans each have ParentSpanId pointing to root", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+		const rootCtx = tracer.getContext()!;
+
+		let a1SpanId: string | undefined;
+		tracer.wrapSync("prompt.1", (_span) => {
+			const a1Ctx = tracer.getContext()!;
+			a1SpanId = a1Ctx.SpanId;
+			expect(a1Ctx.ParentSpanId).toBe(rootCtx.SpanId);
+		});
+
+		tracer.wrapSync("prompt.2", (_span) => {
+			const a2Ctx = tracer.getContext()!;
+			expect(a2Ctx.ParentSpanId).toBe(rootCtx.SpanId);
+			// Different SpanIds for the two spans
+			expect(a2Ctx.SpanId).not.toBe(a1SpanId);
+		});
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("ParentSpanId is stable across consecutive getContext calls", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			tracer.wrapSync("tool_call", (_toolSpan) => {
+				const ctx1 = tracer.getContext()!;
+				const ctx2 = tracer.getContext()!;
+				const ctx3 = tracer.getContext()!;
+
+				expect(ctx1.ParentSpanId).toBe(ctx2.ParentSpanId);
+				expect(ctx2.ParentSpanId).toBe(ctx3.ParentSpanId);
+				expect(ctx1.SpanId).toBe(ctx2.SpanId);
+				expect(ctx2.SpanId).toBe(ctx3.SpanId);
+			});
+		});
+
+		tracer.endRootSpan("ok");
+		provider.shutdown();
+	});
+
+	it("tracked span has correct ParentSpanId", () => {
+		const { tracer, provider } = createTestTracer();
+		tracer.startRootSpan("session");
+
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+
+			// Start a tracked tool call span
+			tracer.startTracked(
+				"tc_42",
+				"tool_call",
+				{ "tool.call_id": "tc_42" },
+				"tool call",
 			);
-		} catch {
-			// expected
-		}
 
-		// After the throw, context is back to active
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-		expect(afterCtx.ParentSpanId).toBe(tracer.getTraceContext()!.ParentSpanId);
+			const toolCtx = tracer.getContext()!;
+			expect(toolCtx.ParentSpanId).toBe(promptCtx.SpanId);
+			expect(toolCtx.SpanId).not.toBe(promptCtx.SpanId);
 
-		tracer.endActiveSpan(active);
+			// End tracked span
+			tracer.endTracked("tc_42");
+
+			// Context reverts to prompt
+			const afterCtx = tracer.getContext()!;
+			expect(afterCtx.SpanId).toBe(promptCtx.SpanId);
+		});
+
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
-	it("traced() that throws still restores ParentSpanId correctly", async () => {
+	it("wrap() provides correct ParentSpanId inside the callback", async () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
 
-		try {
-			await tracer.traced(
-				"async.failing.op",
-				async (_span) => {
-					const ctx = tracer.getTraceContext()!;
-					expect(ctx.ParentSpanId).toBe(activeCtx.SpanId);
-					throw new Error("async boom");
-				},
-				{ parent: "active" },
-			);
-		} catch {
-			// expected
-		}
+		const _rootCtx = tracer.getContext()!;
 
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
+		let innerCtx: ReturnType<typeof tracer.getContext>;
+		await tracer.wrap("prompt.1", async (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
 
-		tracer.endActiveSpan(active);
-		tracer.endRootSpan("ok");
-		provider.shutdown();
-	});
+			await tracer.wrap("fs.read", async (_span) => {
+				innerCtx = tracer.getContext();
+			});
 
-	it("simulated terminal span lifecycle has correct ParentSpanId", () => {
-		const { tracer, provider } = createTestTracer();
-		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
+			expect(innerCtx!).toBeDefined();
+			expect(innerCtx!.ParentSpanId).toBe(promptCtx.SpanId);
 
-		// Start a terminal span (child of active, tracked by terminal ID)
-		const termSpan = tracer.startOperation(
-			"terminal",
-			{
-				"terminal.id": "term_1",
-				"terminal.command": "ls -la",
-			},
-			"active",
-		);
-		tracer.trackSpan("term_1", termSpan, "terminal:term_1");
+			// After wrap() completes, ParentSpanId reverts
+			const afterCtx = tracer.getContext()!;
+			expect(afterCtx.SpanId).toBe(promptCtx.SpanId);
+		});
 
-		// Enter terminal span for logging
-		tracer.enterSpan(termSpan);
-		const termCtx = tracer.getTraceContext()!;
-		expect(termCtx.ParentSpanId).toBe(activeCtx.SpanId);
-		expect(termCtx.SpanId).not.toBe(activeCtx.SpanId);
-
-		// Terminal exits — leave span, remove tracked, end
-		tracer.leaveSpan(termSpan);
-		const removed = tracer.removeTrackedSpan("term_1");
-		expect(removed).toBe(termSpan);
-
-		// Back to active
-		const afterCtx = tracer.getTraceContext()!;
-		expect(afterCtx.SpanId).toBe(activeCtx.SpanId);
-		expect(afterCtx.ParentSpanId).toBe(tracer.getTraceContext()!.ParentSpanId);
-
-		tracer.endOperation(termSpan);
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
@@ -2050,75 +1666,64 @@ describe("Tracer — ParentSpanId", () => {
 	it("multiple tool calls in same prompt each have ParentSpanId pointing to prompt", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
 
-		// First tool call
-		const tool1 = tracer.startOperation("tool_call.1", {}, "active");
-		tracer.enterSpan(tool1);
-		const tool1Ctx = tracer.getTraceContext()!;
-		expect(tool1Ctx.ParentSpanId).toBe(activeCtx.SpanId);
-		tracer.leaveSpan(tool1);
-		tracer.endOperation(tool1);
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
 
-		// Second tool call
-		const tool2 = tracer.startOperation("tool_call.2", {}, "active");
-		tracer.enterSpan(tool2);
-		const tool2Ctx = tracer.getTraceContext()!;
-		expect(tool2Ctx.ParentSpanId).toBe(activeCtx.SpanId);
-		// Different SpanId from first tool
-		expect(tool2Ctx.SpanId).not.toBe(tool1Ctx.SpanId);
-		tracer.leaveSpan(tool2);
-		tracer.endOperation(tool2);
+			// First tool call
+			tracer.wrapSync("tool_call.1", (_span) => {
+				const tool1Ctx = tracer.getContext()!;
+				expect(tool1Ctx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
 
-		// Third tool call
-		const tool3 = tracer.startOperation("tool_call.3", {}, "active");
-		tracer.enterSpan(tool3);
-		const tool3Ctx = tracer.getTraceContext()!;
-		expect(tool3Ctx.ParentSpanId).toBe(activeCtx.SpanId);
-		expect(tool3Ctx.SpanId).not.toBe(tool1Ctx.SpanId);
-		expect(tool3Ctx.SpanId).not.toBe(tool2Ctx.SpanId);
-		tracer.leaveSpan(tool3);
-		tracer.endOperation(tool3);
+			// Second tool call
+			tracer.wrapSync("tool_call.2", (_span) => {
+				const tool2Ctx = tracer.getContext()!;
+				expect(tool2Ctx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
 
-		tracer.endActiveSpan(active);
+			// Third tool call
+			tracer.wrapSync("tool_call.3", (_span) => {
+				const tool3Ctx = tracer.getContext()!;
+				expect(tool3Ctx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
+		});
+
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
 
 	it("ParentSpanId is undefined for disabled tracer", () => {
 		const tracer = new Tracer({ enabled: false });
-		expect(tracer.getTraceContext()).toBeUndefined();
+		expect(tracer.getContext()).toBeUndefined();
 
 		tracer.startRootSpan("session");
-		expect(tracer.getTraceContext()).toBeUndefined();
+		expect(tracer.getContext()).toBeUndefined();
 	});
 
 	it("TraceId is consistent while ParentSpanId changes through the hierarchy", () => {
 		const { tracer, provider } = createTestTracer();
 		tracer.startRootSpan("session");
-		const rootCtx = tracer.getTraceContext()!;
+		const rootCtx = tracer.getContext()!;
 		const traceId = rootCtx.TraceId;
 
-		const active = tracer.startActiveSpan("prompt.1");
-		const activeCtx = tracer.getTraceContext()!;
-		expect(activeCtx.TraceId).toBe(traceId);
-		expect(activeCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		tracer.wrapSync("prompt.1", (_promptSpan) => {
+			const promptCtx = tracer.getContext()!;
+			expect(promptCtx.TraceId).toBe(traceId);
+			expect(promptCtx.ParentSpanId).toBe(rootCtx.SpanId);
 
-		const op = tracer.startOperation("tool_call", {}, "active");
-		tracer.enterSpan(op);
-		const opCtx = tracer.getTraceContext()!;
-		expect(opCtx.TraceId).toBe(traceId);
-		expect(opCtx.ParentSpanId).toBe(activeCtx.SpanId);
+			tracer.wrapSync("tool_call", (_span) => {
+				const opCtx = tracer.getContext()!;
+				expect(opCtx.TraceId).toBe(traceId);
+				expect(opCtx.ParentSpanId).toBe(promptCtx.SpanId);
+			});
 
-		tracer.leaveSpan(op);
-		// Back to active — same TraceId, ParentSpanId reverts to root
-		const revertCtx = tracer.getTraceContext()!;
-		expect(revertCtx.TraceId).toBe(traceId);
-		expect(revertCtx.ParentSpanId).toBe(rootCtx.SpanId);
+			// Back to prompt — same TraceId, ParentSpanId reverts to root
+			const revertCtx = tracer.getContext()!;
+			expect(revertCtx.TraceId).toBe(traceId);
+			expect(revertCtx.ParentSpanId).toBe(rootCtx.SpanId);
+		});
 
-		tracer.endOperation(op);
-		tracer.endActiveSpan(active);
 		tracer.endRootSpan("ok");
 		provider.shutdown();
 	});
@@ -2139,7 +1744,6 @@ describe("Tracer — Custom Configuration", () => {
 		tracer.startRootSpan("pipeline.run");
 		tracer.endRootSpan("ok");
 
-		const _spans = provider as any;
 		// If it didn't throw, the config was accepted
 		expect(tracer.enabled).toBe(true);
 

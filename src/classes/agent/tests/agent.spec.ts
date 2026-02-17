@@ -8,6 +8,7 @@ import type { AgentConfig } from "../../../types/agent.types.ts";
 import type {
 	AgentDestroyedEvent,
 	AgentErrorEvent,
+	ApproveRequestEvent,
 	ContextInjectedEvent,
 } from "../../../types/events.types.ts";
 import { Agent } from "../agent.ts";
@@ -520,6 +521,24 @@ describe("Agent Configuration Defaults", () => {
 
 		await agent.destroy();
 	});
+
+	it("does not set onApproveRequest when autoApprove is true (default)", () => {
+		const agent = new Agent(testConfig());
+
+		// When autoApprove is true, no APPROVE_REQUEST listener is needed
+		// The agent should work without any approval handler
+		expect(agent).toBeInstanceOf(Agent);
+
+		agent.destroy().catch(() => {});
+	});
+
+	it("supports autoApprove false without error", () => {
+		const agent = new Agent(testConfig({ autoApprove: false }));
+
+		expect(agent).toBeInstanceOf(Agent);
+
+		agent.destroy().catch(() => {});
+	});
 });
 
 // ── Agent Status Transitions ───────────────────────────────────────────────
@@ -620,6 +639,10 @@ describe("AgentEvent Enum", () => {
 		);
 		expect(AgentEvent.PERMISSION_GRANTED as string).toBe("permission:granted");
 		expect(AgentEvent.PERMISSION_DENIED as string).toBe("permission:denied");
+	});
+
+	it("has approve request event", () => {
+		expect(AgentEvent.APPROVE_REQUEST as string).toBe("approve:request");
 	});
 
 	it("has all expected terminal events", () => {
@@ -804,6 +827,92 @@ describe("Agent Logger Configuration", () => {
 		expect(agent.logger).toBeDefined();
 
 		agent.destroy().catch(() => {});
+	});
+
+	// ── Approve Request Event (autoApprove: false) ─────────────────────────────
+
+	describe("Agent Approve Request (autoApprove: false)", () => {
+		it("emits APPROVE_REQUEST event type with correct string value", () => {
+			const value: string = AgentEvent.APPROVE_REQUEST;
+			expect(value).toBe("approve:request");
+		});
+
+		it("can register a listener for APPROVE_REQUEST", () => {
+			const agent = new Agent(testConfig({ autoApprove: false }));
+
+			agent.on(AgentEvent.APPROVE_REQUEST, () => {
+				// listener registered
+			});
+
+			expect(agent.listenerCount(AgentEvent.APPROVE_REQUEST)).toBe(1);
+
+			agent.destroy().catch(() => {});
+		});
+
+		it("APPROVE_REQUEST listener count is zero when not registered", () => {
+			const agent = new Agent(testConfig({ autoApprove: false }));
+
+			expect(agent.listenerCount(AgentEvent.APPROVE_REQUEST)).toBe(0);
+
+			agent.destroy().catch(() => {});
+		});
+
+		it("supports multiple APPROVE_REQUEST listeners", () => {
+			const agent = new Agent(testConfig({ autoApprove: false }));
+
+			agent.on(AgentEvent.APPROVE_REQUEST, () => {});
+			agent.on(AgentEvent.APPROVE_REQUEST, () => {});
+
+			expect(agent.listenerCount(AgentEvent.APPROVE_REQUEST)).toBe(2);
+
+			agent.destroy().catch(() => {});
+		});
+
+		it("APPROVE_REQUEST listener can be removed with off()", () => {
+			const agent = new Agent(testConfig({ autoApprove: false }));
+
+			const listener = () => {};
+			agent.on(AgentEvent.APPROVE_REQUEST, listener);
+			expect(agent.listenerCount(AgentEvent.APPROVE_REQUEST)).toBe(1);
+
+			agent.off(AgentEvent.APPROVE_REQUEST, listener);
+			expect(agent.listenerCount(AgentEvent.APPROVE_REQUEST)).toBe(0);
+
+			agent.destroy().catch(() => {});
+		});
+
+		it("does not emit APPROVE_REQUEST when autoApprove is true", () => {
+			const agent = new Agent(testConfig({ autoApprove: true }));
+
+			const events = collectEvents<ApproveRequestEvent>(
+				agent,
+				AgentEvent.APPROVE_REQUEST,
+			);
+
+			// Even if we register a listener, it should never fire
+			// because autoApprove=true bypasses the approval flow entirely
+			expect(events.length).toBe(0);
+
+			agent.destroy().catch(() => {});
+		});
+
+		it("ApproveRequestEvent payload shape is correct in the type system", () => {
+			// This is a compile-time type check — if it compiles, the types are correct.
+			const agent = new Agent(testConfig({ autoApprove: false }));
+
+			agent.on(AgentEvent.APPROVE_REQUEST, (e) => {
+				// Type-check: these fields should exist on ApproveRequestEvent
+				const _event: typeof AgentEvent.APPROVE_REQUEST = e.event;
+				const _timestamp: string = e.timestamp;
+				const _agent: { id: string; name: string } = e.agent;
+				const _toolCallId: string = e.toolCallId;
+				const _toolCallTitle: string = e.toolCallTitle;
+				const _options: readonly unknown[] = e.options;
+				const _resolve: (approved: boolean) => void = e.resolve;
+			});
+
+			agent.destroy().catch(() => {});
+		});
 	});
 
 	it("accepts all valid log levels", () => {

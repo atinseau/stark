@@ -5,15 +5,17 @@
  *
  *   1. Creating an agent with custom configuration
  *   2. Subscribing to typed events (tool calls, plans, file I/O, etc.)
- *   3. Sending a prompt and reading the result
- *   4. Injecting context mid-execution
- *   5. Inspecting agent state via snapshots
- *   6. Graceful shutdown
+ *   3. Interactive permission approval via APPROVE_REQUEST event
+ *   4. Sending a prompt and reading the result
+ *   5. Injecting context mid-execution
+ *   6. Inspecting agent state via snapshots
+ *   7. Graceful shutdown
  *
  * Run with:
  *   bun run src/index.ts
  */
 
+import * as readline from "node:readline";
 import { Agent } from "../classes/agent/agent.ts";
 import { AgentEvent } from "../enums/agent-event.enum.ts";
 import { ansi, renderBar, separator } from "../utils/formatting.ts";
@@ -38,6 +40,28 @@ function indentBlock(text: string, prefix = "       "): string {
 		.join("\n");
 }
 
+/**
+ * Prompt the user on stdin with a yes/no question.
+ * Returns `true` for yes, `false` for no.
+ */
+function askYesNo(question: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const rl = readline.createInterface({
+			input: process.stdin,
+			output: process.stderr,
+		});
+
+		rl.question(
+			`  ❓  ${question} ${ansi.bold}(yes/no)${ansi.reset}: `,
+			(answer) => {
+				rl.close();
+				const normalized = answer.trim().toLowerCase();
+				resolve(normalized === "yes" || normalized === "y");
+			},
+		);
+	});
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -45,6 +69,10 @@ async function main(): Promise<void> {
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
 	// │  1. Create an agent with custom config                             │
+	// │                                                                    │
+	// │  autoApprove is set to false — the agent will emit an              │
+	// │  APPROVE_REQUEST event for each permission request, and we         │
+	// │  handle it below by asking the user on stdin.                      │
 	// └─────────────────────────────────────────────────────────────────────┘
 
 	const agent = new Agent({
@@ -69,8 +97,9 @@ async function main(): Promise<void> {
 		// OpenTelemetry tracing → Seq (docker compose up -d)
 		tracing: true,
 
-		// Automatically approve all tool permission requests
-		autoApprove: true,
+		// Interactive approval — each tool permission request will block
+		// until the user confirms via stdin (Yes/No)
+		autoApprove: false,
 	});
 
 	info(
@@ -78,6 +107,10 @@ async function main(): Promise<void> {
 		`Agent: ${ansi.bold}${agent.name}${ansi.reset} ${ansi.dim}(${agent.id})${ansi.reset}`,
 	);
 	info("📊", `Status: ${agent.status}`);
+	info(
+		"🔐",
+		`Auto-approve: ${ansi.yellow}off${ansi.reset} — you will be prompted for each permission request`,
+	);
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
 	// │  2. Subscribe to typed events                                      │
@@ -226,6 +259,42 @@ async function main(): Promise<void> {
 		info("🔒", `Permission denied: ${ansi.red}${e.reason}${ansi.reset}`);
 	});
 
+	// ┌─────────────────────────────────────────────────────────────────────┐
+	// │  3. Interactive approval handler                                   │
+	// │                                                                    │
+	// │  Because autoApprove is false, the agent emits APPROVE_REQUEST     │
+	// │  whenever it needs permission. We block on stdin until the user    │
+	// │  types "yes" or "no".                                              │
+	// └─────────────────────────────────────────────────────────────────────┘
+
+	agent.on(AgentEvent.APPROVE_REQUEST, (e) => {
+		process.stderr.write(
+			`\n${ansi.bold}${ansi.yellow}┌── Permission Request ──────────────────────────────────┐${ansi.reset}\n`,
+		);
+		info("🔐", `Tool: ${ansi.bold}${e.toolCallTitle}${ansi.reset}`);
+		info("🆔", `Tool call ID: ${ansi.dim}${e.toolCallId}${ansi.reset}`);
+
+		if (e.options.length > 0) {
+			info("📋", "Available options:");
+			for (const opt of e.options) {
+				info("  ", `  ${ansi.dim}[${opt.kind}]${ansi.reset} ${opt.name}`);
+			}
+		}
+
+		process.stderr.write(
+			`${ansi.bold}${ansi.yellow}└────────────────────────────────────────────────────────┘${ansi.reset}\n`,
+		);
+
+		askYesNo("Do you approve this action?").then((approved) => {
+			if (approved) {
+				info("✅", `${ansi.green}User approved${ansi.reset}`);
+			} else {
+				info("🚫", `${ansi.red}User denied${ansi.reset}`);
+			}
+			e.resolve(approved);
+		});
+	});
+
 	// Token usage
 	agent.on(AgentEvent.USAGE_UPDATE, (e) => {
 		const bar = renderBar(e.contextPercent);
@@ -258,7 +327,7 @@ async function main(): Promise<void> {
 	info("📡", "All event listeners registered");
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
-	// │  3. Wait for the agent to be ready                                 │
+	// │  4. Wait for the agent to be ready                                 │
 	// └─────────────────────────────────────────────────────────────────────┘
 
 	heading("WAITING FOR AGENT READY");
@@ -277,7 +346,7 @@ async function main(): Promise<void> {
 	);
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
-	// │  4. Send a prompt                                                  │
+	// │  5. Send a prompt                                                  │
 	// └─────────────────────────────────────────────────────────────────────┘
 
 	heading("SENDING PROMPT");
@@ -309,7 +378,7 @@ async function main(): Promise<void> {
 	}
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
-	// │  5. Demonstrate context injection                                  │
+	// │  6. Demonstrate context injection                                  │
 	// │                                                                    │
 	// │  This shows how a pool orchestrator could alter the agent's        │
 	// │  behavior between prompts. The injected context becomes part of    │
@@ -335,7 +404,7 @@ async function main(): Promise<void> {
 	// // await promptPromise; // injected context is sent as follow-up
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
-	// │  6. Inspect agent state via snapshot                               │
+	// │  7. Inspect agent state via snapshot                               │
 	// └─────────────────────────────────────────────────────────────────────┘
 
 	heading("AGENT SNAPSHOT");
@@ -349,7 +418,7 @@ async function main(): Promise<void> {
 	info("🔗", `Session: ${snap.sessionId ?? "none"}`);
 
 	// ┌─────────────────────────────────────────────────────────────────────┐
-	// │  7. Graceful shutdown                                              │
+	// │  8. Graceful shutdown                                              │
 	// └─────────────────────────────────────────────────────────────────────┘
 
 	heading("SHUTTING DOWN");

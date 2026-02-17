@@ -3,10 +3,11 @@ import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 
 import * as acp from "@agentclientprotocol/sdk";
-import { SpanStatusCode } from "@opentelemetry/api";
+
 import type pino from "pino";
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../enums/agent-status.enum.ts";
+import { SpanName } from "../../enums/span-name.enum.ts";
 import { createLogger } from "../../logger/create-logger.ts";
 import type {
 	AgentConfig,
@@ -15,6 +16,7 @@ import type {
 	PromptResult,
 } from "../../types/agent.types.ts";
 import type { AgentEventMap } from "../../types/events.types.ts";
+import { toError } from "../../utils/errors.ts";
 import { isoNow, truncate } from "../../utils/formatting.ts";
 import { generateIdentity } from "../../utils/identity.ts";
 import { TerminalManager } from "../terminal-manager/terminal-manager.ts";
@@ -173,7 +175,7 @@ export class Agent extends EventEmitter {
 		});
 
 		// Start the root session span immediately so traceId is available
-		this.tracer.startRootSpan("agent.session", {
+		this.tracer.startRootSpan(SpanName.AGENT_SESSION, {
 			"agent.id": this.identity.id,
 			"agent.name": this.identity.name,
 		});
@@ -186,7 +188,7 @@ export class Agent extends EventEmitter {
 		this.logger = createLogger(this.identity, {
 			logOutput: this.config.logOutput,
 			logLevel: this.config.logLevel,
-			traceContextProvider: () => this.tracer.getTraceContext(),
+			traceContextProvider: () => this.tracer.getContext(),
 		});
 
 		// Create the bound emitEvent callback for child components
@@ -205,7 +207,25 @@ export class Agent extends EventEmitter {
 			this.tracer,
 			emitEvent,
 			this.terminalManager,
-			{ autoApprove: this.config.autoApprove },
+			{
+				autoApprove: this.config.autoApprove,
+				onApproveRequest: this.config.autoApprove
+					? undefined
+					: async (request) => {
+							// If no listener is registered, deny immediately
+							if (this.listenerCount(AgentEvent.APPROVE_REQUEST) === 0) {
+								return false;
+							}
+							return new Promise<boolean>((resolve) => {
+								this.emitTyped(AgentEvent.APPROVE_REQUEST, {
+									toolCallId: request.toolCallId,
+									toolCallTitle: request.toolCallTitle,
+									options: request.options,
+									resolve,
+								});
+							});
+						},
+			},
 		);
 
 		// Wire terminal manager callbacks to our event system
@@ -219,10 +239,9 @@ export class Agent extends EventEmitter {
 		});
 
 		this.terminalManager.setExitCallback((terminalId, result) => {
-			// Enter the terminal span so that the "Terminal exited" log
+			// Re-activate the terminal span so that the "Terminal exited" log
 			// carries the terminal's own SpanId (not the prompt's).
-			const termSpan = this.tracer.getTrackedSpan(terminalId);
-			if (termSpan) this.tracer.enterSpan(termSpan);
+			this.tracer.activateTracked(terminalId);
 
 			this.logger.info(
 				{ terminalId, exitCode: result.exitCode, signal: result.signal },
@@ -230,7 +249,6 @@ export class Agent extends EventEmitter {
 			);
 
 			// End the terminal span that was started in the ACP client factory.
-			// traceTerminalEnd calls leaveSpan + end internally.
 			this.traceTerminalEnd(terminalId, result.exitCode, result.signal);
 
 			this.emitTyped(AgentEvent.TERMINAL_EXIT, {
@@ -240,20 +258,24 @@ export class Agent extends EventEmitter {
 			});
 		});
 
+		// Log with the root span's context BEFORE initialize() pushes child
+		// spans onto the stack. This ensures the agent.session root span's
+		// SpanId appears in at least one log event, making it visible in Seq
+		// (prevents "Missing" span entries).
+		this.logger.info(
+			{ agentId: this.identity.id, agentName: this.identity.name },
+			"Agent session started",
+		);
+
 		// Start async initialization — consumers await `agent.ready`
 		this.ready = this.initialize().catch((err) => {
 			this.setStatus(AgentStatus.ERROR);
 			this.emitTyped(AgentEvent.AGENT_ERROR, {
-				error: err instanceof Error ? err : new Error(String(err)),
+				error: toError(err),
 				context: "initialization",
 			});
 			throw err;
 		});
-
-		this.logger.info(
-			{ agentId: this.identity.id, agentName: this.identity.name },
-			"Agent created, initializing…",
-		);
 	}
 
 	// ── Public API: Prompt ─────────────────────────────────────────────────
@@ -295,13 +317,6 @@ export class Agent extends EventEmitter {
 			promptIndex,
 		});
 
-		// ── Tracing: start prompt span ───────────────────────────────────
-		const promptSpan = this.tracer.startActiveSpan("agent.prompt", {
-			"prompt.index": promptIndex,
-			"prompt.text": fullPrompt.slice(0, 500),
-			"prompt.text_length": fullPrompt.length,
-		});
-
 		this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
 
 		if (!this.connection || !this._sessionId) {
@@ -309,37 +324,54 @@ export class Agent extends EventEmitter {
 		}
 
 		try {
-			const result = await this.connection.prompt({
-				sessionId: this._sessionId,
-				prompt: [{ type: "text", text: fullPrompt }],
-			});
+			const promptResult = await this.tracer.wrap(
+				SpanName.AGENT_PROMPT,
+				{
+					"prompt.index": promptIndex,
+					"prompt.text": fullPrompt.slice(0, 500),
+					"prompt.text_length": fullPrompt.length,
+				},
+				async (promptSpan) => {
+					if (!this._sessionId) {
+						throw new Error("Session ID is not available");
+					}
+					const result = await this.connection?.prompt({
+						sessionId: this._sessionId,
+						prompt: [{ type: "text", text: fullPrompt }],
+					});
 
-			const promptResult: PromptResult = {
-				stopReason: result.stopReason,
-				text: this.sessionUpdateHandler.responseText,
-				usage: result.usage,
-			};
+					if (!result) {
+						throw new Error(
+							"Prompt returned no result — connection may be closed",
+						);
+					}
+
+					if (promptSpan.isRecording() && result.stopReason) {
+						promptSpan.setAttribute("prompt.stop_reason", result.stopReason);
+					}
+
+					return {
+						stopReason: result.stopReason,
+						text: this.sessionUpdateHandler.responseText,
+						usage: result.usage,
+					} satisfies PromptResult;
+				},
+			);
 
 			this.emitTyped(AgentEvent.PROMPT_COMPLETE, {
-				stopReason: result.stopReason,
-				fullText: this.sessionUpdateHandler.responseText,
-				usage: result.usage,
+				stopReason: promptResult.stopReason,
+				fullText: promptResult.text,
+				usage: promptResult.usage,
 			});
 
 			this.logger.info(
 				{
-					stopReason: result.stopReason,
-					responseLength: this.sessionUpdateHandler.responseText.length,
-					usage: result.usage,
+					stopReason: promptResult.stopReason,
+					responseLength: promptResult.text.length,
+					usage: promptResult.usage,
 				},
 				"Prompt completed",
 			);
-
-			// ── Tracing: end prompt span (success) ─────────────────────────
-			if (promptSpan.isRecording() && result.stopReason) {
-				promptSpan.setAttribute("prompt.stop_reason", result.stopReason);
-			}
-			this.tracer.endActiveSpan(promptSpan);
 
 			this.setStatus(AgentStatus.IDLE);
 			this.emitTyped(AgentEvent.AGENT_IDLE, {
@@ -351,10 +383,7 @@ export class Agent extends EventEmitter {
 
 			return promptResult;
 		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
-
-			// ── Tracing: end prompt span (error) ───────────────────────────
-			this.tracer.endActiveSpan(promptSpan, error);
+			const error = toError(err);
 
 			this.setStatus(AgentStatus.ERROR);
 			this.emitTyped(AgentEvent.AGENT_ERROR, {
@@ -571,163 +600,141 @@ export class Agent extends EventEmitter {
 	 * Called once from the constructor; consumers await `agent.ready`.
 	 */
 	private async initialize(): Promise<void> {
-		// ── Tracing: start initialize span ───────────────────────────────
-		const initSpan = this.tracer.startOperation("agent.initialize", {}, "root");
-		this.tracer.enterSpan(initSpan);
-
-		this.logger.debug(
-			{ executable: this.config.executable },
-			"Spawning ACP process",
-		);
-
-		// Spawn the agent process — wrap in try-catch for ENOENT and similar errors
-		const spawnPhase = this.tracer.startOperation(
-			"agent.initialize.spawn-process",
-			{},
-			initSpan,
-		);
-		let proc: ChildProcess;
-		try {
-			proc = spawn(this.config.executable, ["--acp", "--stdio"], {
-				stdio: ["pipe", "pipe", "inherit"],
-			});
-			this.tracer.endOperation(spawnPhase);
-		} catch (err) {
-			const error = new Error(
-				`Failed to spawn ACP process "${this.config.executable}": ${err instanceof Error ? err.message : String(err)}`,
+		await this.tracer.wrap(SpanName.AGENT_INITIALIZE, async () => {
+			this.logger.debug(
+				{ executable: this.config.executable },
+				"Spawning ACP process",
 			);
-			this.tracer.endOperation(spawnPhase, error);
-			this.tracer.leaveSpan(initSpan);
-			this.tracer.endOperation(initSpan, error);
-			throw error;
-		}
 
-		// Listen for spawn errors (e.g. ENOENT when executable doesn't exist).
-		// The error event fires asynchronously after spawn() returns.
-		const spawnError = new Promise<never>((_, reject) => {
-			proc.once("error", (err) => {
-				reject(
-					new Error(
-						`Failed to start ACP process "${this.config.executable}": ${err.message}`,
-					),
-				);
-			});
-		});
-
-		if (!proc.stdin || !proc.stdout) {
-			throw new Error(
-				`Failed to start ACP process "${this.config.executable}" with piped stdio`,
-			);
-		}
-
-		this.process = proc;
-
-		// Handle unexpected process exit
-		proc.once("exit", (code, signal) => {
-			if (this._status !== AgentStatus.DESTROYED) {
-				this.logger.warn({ code, signal }, "ACP process exited unexpectedly");
-				this.setStatus(AgentStatus.ERROR);
-				this.emitTyped(AgentEvent.AGENT_ERROR, {
-					error: new Error(
-						`ACP process exited unexpectedly (code=${code}, signal=${signal})`,
-					),
-					context: "process_exit",
+			// Spawn the agent process and attach the error listener immediately
+			// (before any microtask tick) so Bun's async ENOENT is always caught.
+			let proc: ChildProcess | undefined;
+			let spawnError: Promise<never>;
+			await this.tracer.wrap(SpanName.AGENT_SPAWN_PROCESS, async () => {
+				const spawned = spawn(this.config.executable, ["--acp", "--stdio"], {
+					stdio: ["pipe", "pipe", "inherit"],
 				});
-			}
-		});
+				proc = spawned;
 
-		// Create the NDJSON stream and ACP connection
-		const output = Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>;
-		const input = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
-		const stream = acp.ndJsonStream(output, input);
-
-		// Keep a reference to the raw writable stream for graceful shutdown
-		this.outputStream = output;
-
-		const client = this.acpClientFactory.build((update) =>
-			this.sessionUpdateHandler.handle(update),
-		);
-		this.connection = new acp.ClientSideConnection((_agent) => client, stream);
-
-		// Initialize the protocol.
-		// Race against spawnError so that ENOENT is surfaced properly
-		// instead of hanging on the initialize() call.
-		this.logger.debug("Sending ACP initialize request");
-
-		const acpInitPhase = this.tracer.startOperation(
-			"agent.initialize.acp-protocol-init",
-			{},
-			initSpan,
-		);
-
-		let initResult: Awaited<ReturnType<acp.ClientSideConnection["initialize"]>>;
-		try {
-			initResult = await Promise.race([
-				this.connection.initialize({
-					protocolVersion: acp.PROTOCOL_VERSION,
-					clientCapabilities: {
-						fs: {
-							readTextFile: true,
-							writeTextFile: true,
-						},
-						terminal: true,
-					},
-				}),
-				spawnError,
-			]);
-			this.tracer.endOperation(acpInitPhase);
-		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
-			this.tracer.endOperation(acpInitPhase, error);
-			this.tracer.leaveSpan(initSpan);
-			this.tracer.endOperation(initSpan, error);
-			throw error;
-		}
-
-		this.logger.info(
-			{
-				protocolVersion: initResult.protocolVersion,
-				agentInfo: initResult.agentInfo,
-			},
-			"ACP protocol initialized",
-		);
-
-		// Create a new session
-		this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
-
-		const sessionPhase = this.tracer.startOperation(
-			"agent.initialize.create-session",
-			{},
-			initSpan,
-		);
-
-		let sessionResult: Awaited<
-			ReturnType<acp.ClientSideConnection["newSession"]>
-		>;
-		try {
-			sessionResult = await this.connection.newSession({
-				cwd: this.config.cwd,
-				mcpServers: this.config.mcpServers ?? [],
+				// Listen for spawn errors (e.g. ENOENT when executable doesn't exist).
+				// Must be attached synchronously right after spawn() so the listener
+				// is in place before the event loop fires the error event.
+				spawnError = new Promise<never>((_, reject) => {
+					spawned.once("error", (err) => {
+						reject(
+							new Error(
+								`Failed to start ACP process "${this.config.executable}": ${err.message}`,
+							),
+						);
+					});
+				});
 			});
-			this.tracer.endOperation(sessionPhase);
-		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
-			this.tracer.endOperation(sessionPhase, error);
-			this.tracer.leaveSpan(initSpan);
-			this.tracer.endOperation(initSpan, error);
-			throw error;
-		}
 
-		this._sessionId = sessionResult.sessionId;
+			if (!proc || !proc.stdin || !proc.stdout) {
+				throw new Error(
+					`Failed to start ACP process "${this.config.executable}" with piped stdio`,
+				);
+			}
 
-		this.logger.info({ sessionId: this._sessionId }, "Session created");
+			this.process = proc;
 
-		// ── Tracing: end initialize span (success) ──────────────────────
-		this.tracer.leaveSpan(initSpan);
-		this.tracer.endOperation(initSpan);
+			// Handle unexpected process exit
+			proc.once("exit", (code, signal) => {
+				if (this._status !== AgentStatus.DESTROYED) {
+					this.logger.warn({ code, signal }, "ACP process exited unexpectedly");
+					this.setStatus(AgentStatus.ERROR);
+					this.emitTyped(AgentEvent.AGENT_ERROR, {
+						error: new Error(
+							`ACP process exited unexpectedly (code=${code}, signal=${signal})`,
+						),
+						context: "process_exit",
+					});
+				}
+			});
+
+			// Create the NDJSON stream and ACP connection
+			const output = Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>;
+			const input = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
+			const stream = acp.ndJsonStream(output, input);
+
+			// Keep a reference to the raw writable stream for graceful shutdown
+			this.outputStream = output;
+
+			const client = this.acpClientFactory.build((update) =>
+				this.sessionUpdateHandler.handle(update),
+			);
+			this.connection = new acp.ClientSideConnection(
+				(_agent) => client,
+				stream,
+			);
+
+			// Initialize the protocol.
+			// Race against spawnError so that ENOENT is surfaced properly
+			// instead of hanging on the initialize() call.
+			this.logger.debug("Sending ACP initialize request");
+
+			const initResult = await this.tracer.wrap(
+				SpanName.AGENT_ACP_PROTOCOL_INIT,
+				async () => {
+					const result = await Promise.race([
+						this.connection?.initialize({
+							protocolVersion: acp.PROTOCOL_VERSION,
+							clientCapabilities: {
+								fs: {
+									readTextFile: true,
+									writeTextFile: true,
+								},
+								terminal: true,
+							},
+						}),
+						spawnError,
+					]);
+					if (!result) {
+						throw new Error(
+							"ACP initialize returned no result — connection may be closed",
+						);
+					}
+					return result;
+				},
+			);
+
+			this.logger.info(
+				{
+					protocolVersion: initResult.protocolVersion,
+					agentInfo: initResult.agentInfo,
+				},
+				"ACP protocol initialized",
+			);
+
+			// Create a new session
+			this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
+
+			const sessionResult = await this.tracer.wrap(
+				SpanName.AGENT_CREATE_SESSION,
+				async () => {
+					const result = await this.connection?.newSession({
+						cwd: this.config.cwd,
+						mcpServers: this.config.mcpServers ?? [],
+					});
+					if (!result) {
+						throw new Error(
+							"ACP newSession returned no result — connection may be closed",
+						);
+					}
+					return result;
+				},
+			);
+
+			this._sessionId = sessionResult.sessionId;
+
+			this.logger.info({ sessionId: this._sessionId }, "Session created");
+		});
 
 		// Ready!
 		this.setStatus(AgentStatus.IDLE);
+		if (!this._sessionId) {
+			throw new Error("Session ID was not set during initialization");
+		}
 		this.emitTyped(AgentEvent.AGENT_READY, {
 			sessionId: this._sessionId,
 		});
@@ -767,7 +774,7 @@ export class Agent extends EventEmitter {
 		exitCode?: number | null,
 		signal?: string | null,
 	): void {
-		const span = this.tracer.removeTrackedSpan(terminalId);
+		const span = this.tracer.getTrackedSpan(terminalId);
 		if (!span || !span.isRecording()) return;
 
 		if (exitCode !== undefined && exitCode !== null) {
@@ -780,17 +787,10 @@ export class Agent extends EventEmitter {
 		const failed =
 			exitCode !== undefined && exitCode !== null && exitCode !== 0;
 
-		span.setStatus(
-			failed
-				? {
-						code: SpanStatusCode.ERROR,
-						message: `Terminal exited with code ${exitCode}`,
-					}
-				: { code: SpanStatusCode.OK },
+		this.tracer.endTracked(
+			terminalId,
+			failed ? new Error(`Terminal exited with code ${exitCode}`) : undefined,
 		);
-
-		this.tracer.leaveSpan(span);
-		span.end();
 	}
 
 	/**
@@ -801,7 +801,7 @@ export class Agent extends EventEmitter {
 	 * recorded as a native boolean.
 	 */
 	private traceContextInjection(instructions: string, queued: boolean): void {
-		this.tracer.recordEvent("active", "context.injected", {
+		this.tracer.recordEvent("context.injected", {
 			"context.instructions": instructions.slice(0, 500),
 			"context.instructions_length": instructions.length,
 			"context.queued": queued,

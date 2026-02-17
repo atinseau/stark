@@ -1,9 +1,9 @@
 import type { Cost, SessionUpdate } from "@agentclientprotocol/sdk";
-import { SpanStatusCode } from "@opentelemetry/api";
 import type pino from "pino";
 
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { SessionUpdateType } from "../../enums/session-update-type.enum.ts";
+import { SpanName } from "../../enums/span-name.enum.ts";
 import type { EmitEventFn } from "../../types/observability.types.ts";
 import { truncate } from "../../utils/formatting.ts";
 import {
@@ -416,7 +416,7 @@ export class AgentSessionUpdateHandler {
 	// ── Private Tracing Helpers ──────────────────────────────────────────
 
 	/**
-	 * Starts an `agent.tool_call` span as a child of the current active span
+	 * Starts an `agent.tool_call` span as a child of the current context
 	 * and tracks it by `toolCallId` so it can be ended later.
 	 */
 	private traceToolCallStart(
@@ -425,19 +425,17 @@ export class AgentSessionUpdateHandler {
 		kind?: string,
 		command?: string,
 	): void {
-		const span = this.tracer.startOperation(
-			"agent.tool_call",
+		this.tracer.startTracked(
+			toolCallId,
+			SpanName.AGENT_TOOL_CALL,
 			{
 				"tool.call_id": toolCallId,
 				"tool.title": title,
 				...(kind && { "tool.kind": kind }),
 				...(command && { "tool.command": command }),
 			},
-			"active",
+			"tool call",
 		);
-
-		this.tracer.trackSpan(toolCallId, span, "tool call");
-		this.tracer.enterSpan(span);
 	}
 
 	/**
@@ -470,7 +468,7 @@ export class AgentSessionUpdateHandler {
 		status?: string,
 		exitCode?: number,
 	): void {
-		const span = this.tracer.removeTrackedSpan(toolCallId);
+		const span = this.tracer.getTrackedSpan(toolCallId);
 		if (!span || !span.isRecording()) return;
 
 		if (status) span.setAttribute("tool.status", status);
@@ -479,17 +477,12 @@ export class AgentSessionUpdateHandler {
 		const failed =
 			status === "failed" || (exitCode !== undefined && exitCode !== 0);
 
-		span.setStatus(
+		this.tracer.endTracked(
+			toolCallId,
 			failed
-				? {
-						code: SpanStatusCode.ERROR,
-						message: `Tool ${status ?? "failed"} (exit ${exitCode ?? "?"})`,
-					}
-				: { code: SpanStatusCode.OK },
+				? new Error(`Tool ${status ?? "failed"} (exit ${exitCode ?? "?"})`)
+				: undefined,
 		);
-
-		this.tracer.leaveSpan(span);
-		span.end();
 	}
 
 	/**
@@ -511,6 +504,6 @@ export class AgentSessionUpdateHandler {
 			attrs["usage.cost_amount"] = cost.amount;
 			attrs["usage.cost_currency"] = cost.currency;
 		}
-		this.tracer.recordEvent("active", "usage.update", attrs);
+		this.tracer.recordEvent("usage.update", attrs);
 	}
 }

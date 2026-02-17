@@ -15,10 +15,9 @@ function silentLogger(): pino.Logger {
 /**
  * Creates a minimal no-op Tracer mock.
  *
- * Exposes the generic API (`startOperation`, `trackSpan`, `getTrackedSpan`,
- * `removeTrackedSpan`, `recordEvent`) that the tracer helper functions use.
- * Domain-specific methods have been extracted to `./tracer-helpers/` and
- * operate on this generic API.
+ * Exposes the new simplified API (`wrap`, `startTracked`, `endTracked`,
+ * `getTrackedSpan`, `recordEvent`, `recordRootEvent`) that the session
+ * update handler and its tracing helpers use.
  */
 function noopTracer(): Tracer {
 	/** Backing store for tracked spans so helpers can retrieve them. */
@@ -47,26 +46,40 @@ function noopTracer(): Tracer {
 		enabled: false,
 		startRootSpan: mock(() => mockSpan()),
 		endRootSpan: mock(() => {}),
-		startActiveSpan: mock(() => mockSpan()),
-		endActiveSpan: mock(() => {}),
-		getTraceContext: mock(() => undefined),
-		startOperation: mock(() => mockSpan()),
-		endOperation: mock(() => {}),
-		traced: mock(async (_name: string, work: (span: any) => Promise<any>) =>
-			work(mockSpan()),
-		),
-		trackSpan: mock((id: string, span: any, label: string = "operation") => {
-			tracked.set(id, { span, label });
+		getRootSpanContext: mock(() => undefined),
+		getContext: mock(() => undefined),
+		currentSpan: mock(() => undefined),
+		wrap: mock(async (_name: string, fnOrAttrs: any, maybeFn?: any) => {
+			const fn = typeof fnOrAttrs === "function" ? fnOrAttrs : maybeFn;
+			return fn(mockSpan());
 		}),
-		getTrackedSpan: mock((id: string) => tracked.get(id)?.span),
-		removeTrackedSpan: mock((id: string) => {
+		wrapSync: mock((_name: string, fnOrAttrs: any, maybeFn?: any) => {
+			const fn = typeof fnOrAttrs === "function" ? fnOrAttrs : maybeFn;
+			return fn(mockSpan());
+		}),
+		startTracked: mock(
+			(
+				id: string,
+				_name: string,
+				_attrs?: any,
+				label: string = "operation",
+			) => {
+				const span = mockSpan();
+				tracked.set(id, { span, label });
+				return span;
+			},
+		),
+		endTracked: mock((id: string) => {
 			const entry = tracked.get(id);
 			tracked.delete(id);
 			return entry?.span;
 		}),
+		getTrackedSpan: mock((id: string) => tracked.get(id)?.span),
+		activateTracked: mock(() => {}),
+		deactivateTracked: mock(() => {}),
 		recordEvent: mock(() => {}),
-		enterSpan: mock(() => {}),
-		leaveSpan: mock(() => {}),
+		recordRootEvent: mock(() => {}),
+		forceExport: mock(async () => {}),
 		flush: mock(async () => {}),
 		shutdown: mock(async () => {}),
 	} as unknown as Tracer;
@@ -327,8 +340,7 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 			rawInput: null,
 		} as any);
 
-		expect(tracer.startOperation).toHaveBeenCalledTimes(1);
-		expect(tracer.trackSpan).toHaveBeenCalledTimes(1);
+		expect(tracer.startTracked).toHaveBeenCalledTimes(1);
 	});
 
 	it("handles tool_call with no kind or locations", () => {
@@ -473,7 +485,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			rawOutput: null,
 		} as any);
 
-		expect(tracer.removeTrackedSpan).toHaveBeenCalledTimes(1);
+		expect(tracer.endTracked).toHaveBeenCalledTimes(1);
 	});
 
 	it("updates tracer tool call span on in-progress", () => {
@@ -704,7 +716,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 		} as any);
 
 		expect(tracer.recordEvent).toHaveBeenCalledTimes(1);
-		expect(tracer.recordEvent).toHaveBeenCalledWith("active", "usage.update", {
+		expect(tracer.recordEvent).toHaveBeenCalledWith("usage.update", {
 			"usage.context_used": 7500,
 			"usage.context_size": 10000,
 			"usage.context_percent": 75,

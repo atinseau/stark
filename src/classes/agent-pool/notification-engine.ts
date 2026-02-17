@@ -8,6 +8,7 @@ import type {
 	NotificationPreference,
 	UserNotification,
 } from "../../types/agent-pool.types.ts";
+import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
@@ -362,7 +363,7 @@ export class NotificationEngine {
 			this.logger.warn(
 				{
 					agentId: delta.agentId,
-					error: error instanceof Error ? error.message : String(error),
+					error: toErrorMessage(error),
 				},
 				"Notification LLM evaluation failed — defaulting to silence",
 			);

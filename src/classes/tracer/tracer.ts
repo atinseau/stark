@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	context,
 	type Tracer as OtelTracer,
@@ -94,21 +95,10 @@ export interface TracerConfig extends TracerProviderConfig {
 	parentSpanContext?: SpanContext;
 }
 
-// ── Parent Strategy ────────────────────────────────────────────────────────
-
-/**
- * Determines which span a new operation span should be parented under.
- *
- * - `"root"`   → child of the root span
- * - `"active"` → child of the active span (falls back to root)
- * - `Span`     → child of an explicit parent span
- */
-export type ParentStrategy = "root" | "active" | Span;
-
 // ── Attribute Value Type ───────────────────────────────────────────────────
 
 /** Values accepted by OpenTelemetry span attributes. */
-export type SpanAttributeValue = string | number | boolean;
+export type SpanAttributeValue = string | number | boolean | string[];
 
 // ── No-Op Sentinel ─────────────────────────────────────────────────────────
 
@@ -134,72 +124,71 @@ const NOOP_SPAN: Span = {
 	recordException: () => {},
 };
 
+// ── AsyncLocalStorage Context ──────────────────────────────────────────────
+
+/** The context stored in AsyncLocalStorage for automatic span propagation. */
+interface TracerStore {
+	/** The current span in this async context. */
+	span: Span;
+}
+
 // ── Tracer ─────────────────────────────────────────────────────────────────
 
 /**
- * Generic, domain-agnostic tracing wrapper around OpenTelemetry.
+ * Tracing wrapper around OpenTelemetry with automatic context propagation
+ * via `AsyncLocalStorage`.
  *
- * Manages a span hierarchy with two named "slots":
+ * ## Core Concepts
  *
- *   Trace (one per Tracer instance)
- *   └── root span (entire lifetime of the traced entity)
- *       ├── child operation spans
- *       │   └── nested operations…
- *       ├── active span (the current "work unit" in progress)
- *       │   ├── child operations…
- *       │   └── …
- *       └── …
+ * - **Root span**: the top-level span representing the entity's entire
+ *   lifetime (e.g., an agent session, a pool lifecycle).
  *
- * The **root span** represents the overall lifetime of the entity being
- * traced (e.g., an agent session, a pipeline run, a request).
+ * - **`wrap()` / `wrapSync()`**: scoped span management. Creates a child
+ *   span of the current context, runs a function within it, and auto-ends
+ *   the span on success or error. Nested `wrap()` calls automatically
+ *   form a parent-child hierarchy via `AsyncLocalStorage`.
  *
- * The **active span** represents the currently running work unit (e.g.,
- * a prompt turn, a pipeline stage, a request handler). Only one active
- * span exists at a time; it is automatically used as the parent for
- * operations started with `parent: "active"`.
+ * - **Tracked spans**: for long-lived spans that start and end at different
+ *   call sites (e.g., tool calls, terminals). Managed via `startTracked()`
+ *   / `endTracked()`. Tracked spans also participate in context resolution
+ *   for log correlation.
+ *
+ * ## Context Resolution
+ *
+ * When determining the "current span" (for parenting new spans, log
+ * correlation via `getContext()`, or `recordEvent()`), the resolution
+ * order is:
+ *
+ *   1. **Tracked span stack** top (most specific active tracked span)
+ *   2. **AsyncLocalStorage** current span (from `wrap()` / `wrapSync()`)
+ *   3. **Root span** (fallback)
+ *
+ * This means:
+ *   - Inside `wrap()`, nested spans are automatically children of the
+ *     enclosing span.
+ *   - When a tracked span is active (e.g., a tool call), operations and
+ *     log lines are associated with that tool call.
+ *   - Outside any `wrap()` or tracked span, everything falls back to root.
+ *
+ * ## Design Philosophy
+ *
+ * The Tracer is domain-agnostic. It provides generic primitives
+ * (`wrap`, `startTracked`, `recordEvent`) that domain-specific code
+ * composes. Span names are centralized in the `SpanName` enum.
  *
  * When tracing is disabled (`enabled: false`), every method returns a
  * no-op span so calling code doesn't need conditional logic.
  *
- * ### Design Philosophy — Generic Core + External Helpers
- *
- * `Tracer` is intentionally domain-agnostic. It provides:
- *
- *   1. **Root span management**: `startRootSpan` / `endRootSpan`
- *
- *   2. **Active span management**: `startActiveSpan` / `endActiveSpan`
- *
- *   3. **Generic span API**: `startOperation`, `endOperation`, `traced`
- *      for creating arbitrary child spans.
- *
- *   4. **Span tracking**: `trackSpan`, `getTrackedSpan`, `removeTrackedSpan`
- *      for long-lived spans started and ended at different call sites.
- *
- *   5. **Event recording**: `recordEvent` for attaching events to the
- *      root or active span without creating a new span.
- *
- * Domain-specific tracing logic (tool calls, permissions, etc.) should
- * live in **external helper functions** that compose on top of this API.
- * This follows the Open/Closed Principle: new domain concepts can be
- * traced by adding new helper modules without modifying this class.
- *
  * @example
  * ```ts
  * const tracer = new Tracer({ enabled: true, serviceName: "my-service" });
- *
  * tracer.startRootSpan("session", { "session.id": "abc" });
  *
- * const activeSpan = tracer.startActiveSpan("request.handle", {
- *   "request.path": "/api/data",
+ * await tracer.wrap("request.handle", { "request.path": "/api" }, async (span) => {
+ *   await tracer.wrap("db.query", async (innerSpan) => {
+ *     // innerSpan is automatically a child of the request span
+ *   });
  * });
- *
- * const opSpan = tracer.startOperation("db.query", {
- *   "db.statement": "SELECT …",
- * }, "active");
- * // … do work …
- * tracer.endOperation(opSpan);
- *
- * tracer.endActiveSpan(activeSpan);
  *
  * await tracer.shutdown();
  * ```
@@ -207,48 +196,6 @@ const NOOP_SPAN: Span = {
 export class Tracer {
 	/** Whether tracing is active. When `false`, all methods return no-op spans. */
 	readonly enabled: boolean;
-
-	/**
-	 * Returns the current trace context for log correlation.
-	 *
-	 * When tracing is enabled, this returns the `TraceId`, `SpanId`, and
-	 * optionally `ParentSpanId` of the most specific span currently in
-	 * scope. Resolution order: span stack top → active span → root span.
-	 *
-	 * The `ParentSpanId` is derived from the internal parent tracking map
-	 * (`spanParents`), which records the parent of every span at creation
-	 * time. This allows log backends like Seq to reconstruct the full span
-	 * hierarchy directly from log events.
-	 *
-	 * When tracing is disabled, returns `undefined`.
-	 *
-	 * @example
-	 * ```ts
-	 * const ctx = tracer.getTraceContext();
-	 * // { TraceId: "abc…", SpanId: "def…", ParentSpanId: "012…" }
-	 * if (ctx) logger.info({ ...ctx }, "Something happened");
-	 * ```
-	 */
-	getTraceContext(): TraceContext | undefined {
-		if (!this.enabled) return undefined;
-
-		const span = this.spanStack.at(-1) ?? this.activeSpan ?? this.rootSpan;
-		if (!span || span === NOOP_SPAN) return undefined;
-
-		const ctx: SpanContext = span.spanContext();
-		const parent = this.spanParents.get(span);
-
-		const result: TraceContext = {
-			TraceId: ctx.traceId,
-			SpanId: ctx.spanId,
-		};
-
-		if (parent && parent !== NOOP_SPAN) {
-			result.ParentSpanId = parent.spanContext().spanId;
-		}
-
-		return result;
-	}
 
 	/** The underlying OTel tracer provider (null when disabled). */
 	private provider: BasicTracerProvider | null = null;
@@ -265,40 +212,32 @@ export class Tracer {
 	/** The root span that is the parent of all other spans. */
 	private rootSpan: Span | null = null;
 
-	/** The currently active span (only one at a time). */
-	private activeSpan: Span | null = null;
-
 	/**
-	 * Span context stack for fine-grained log correlation.
+	 * AsyncLocalStorage for automatic span context propagation.
 	 *
-	 * When a span is "entered" via {@link enterSpan}, it is pushed onto
-	 * this stack. {@link getTraceContext} resolves the top of the stack
-	 * first, giving logs the most specific span context available.
-	 *
-	 * This allows tool call spans, permission spans, and init phase spans
-	 * to appear in logs with their own `SpanId` instead of inheriting
-	 * the coarser active/root span ID.
+	 * `wrap()` and `wrapSync()` use `store.run()` to set the current span,
+	 * making it available to nested calls without explicit parameter passing.
 	 */
-	private readonly spanStack: Span[] = [];
+	private readonly store = new AsyncLocalStorage<TracerStore>();
 
 	/**
 	 * Tracks the parent of every span created via this Tracer.
 	 *
-	 * Populated in {@link startOperation} and {@link startChildOfRoot}
-	 * so that {@link getTraceContext} can derive `ParentSpanId` without
-	 * relying on OTel internals (the `Span` interface does not expose
-	 * the parent span ID).
+	 * Populated in `wrap()`, `wrapSync()`, `startTracked()`, and
+	 * `startRootSpan()` so that `getContext()` can derive `ParentSpanId`
+	 * without relying on OTel internals (the `Span` interface does not
+	 * expose the parent span ID).
 	 *
 	 * Uses `WeakMap` so ended spans can be garbage-collected.
 	 */
 	private readonly spanParents = new WeakMap<Span, Span>();
 
 	/**
-	 * Generic map of tracked long-lived spans keyed by a caller-chosen ID.
+	 * Registry of tracked long-lived spans keyed by a caller-chosen ID.
 	 *
-	 * Used by external helper functions to store spans that are started and
-	 * ended at different call sites (e.g., tool call spans keyed by
-	 * `toolCallId`, terminal spans keyed by `terminalId`).
+	 * Used for spans that are started and ended at different call sites
+	 * (e.g., tool call spans keyed by `toolCallId`, terminal spans keyed
+	 * by `terminalId`).
 	 *
 	 * Each entry carries a `label` for descriptive error messages when the
 	 * span is forcefully ended during shutdown.
@@ -307,6 +246,17 @@ export class Tracer {
 		string,
 		{ span: Span; label: string }
 	>();
+
+	/**
+	 * Stack of activated tracked spans for context resolution.
+	 *
+	 * When a tracked span is started via `startTracked()`, it is pushed
+	 * onto this stack. `getContext()` and `resolveParent()` check this
+	 * stack first, giving logs and child spans the most specific context.
+	 *
+	 * Spans are removed via `endTracked()` or `deactivateTracked()`.
+	 */
+	private readonly trackedSpanStack: Span[] = [];
 
 	// ── Constructor ──────────────────────────────────────────────────────
 
@@ -340,9 +290,10 @@ export class Tracer {
 
 	/**
 	 * Starts the root span that encompasses the entire lifetime of the
-	 * traced entity. All subsequent spans are created as children of this span.
+	 * traced entity. All subsequent spans are created as children of this
+	 * span (directly or transitively via `wrap()` nesting).
 	 *
-	 * @param name       - The span name (e.g. `"agent.session"`, `"pipeline.run"`).
+	 * @param name       - The span name (e.g. `SpanName.AGENT_SESSION`).
 	 * @param attributes - Optional key-value pairs attached to the span.
 	 * @returns The root span.
 	 */
@@ -385,43 +336,12 @@ export class Tracer {
 	 * This is used to pass the root span's context to child Tracer
 	 * instances (e.g., from AgentPool to Agent) so that their root spans
 	 * become children of this span, creating a unified trace hierarchy.
-	 *
-	 * @example
-	 * ```ts
-	 * const poolTracer = new Tracer({ serviceName: "stark-pool" });
-	 * poolTracer.startRootSpan("pool.execution");
-	 *
-	 * // Pass to a child tracer
-	 * const parentCtx = poolTracer.getRootSpanContext();
-	 * const childTracer = new Tracer({
-	 *   serviceName: "stark-agent",
-	 *   parentSpanContext: parentCtx,
-	 * });
-	 * ```
 	 */
 	getRootSpanContext(): SpanContext | undefined {
 		if (!this.enabled || !this.rootSpan || this.rootSpan === NOOP_SPAN) {
 			return undefined;
 		}
 		return this.rootSpan.spanContext();
-	}
-
-	/**
-	 * Returns the `SpanContext` of the currently active span (or the most
-	 * specific span in scope), or `undefined` if tracing is disabled.
-	 *
-	 * Resolution order: span stack top → active span → root span.
-	 *
-	 * This is useful for creating child spans in external tracer instances
-	 * that should be linked to the most specific currently active operation.
-	 */
-	getActiveSpanContext(): SpanContext | undefined {
-		if (!this.enabled) return undefined;
-
-		const span = this.spanStack.at(-1) ?? this.activeSpan ?? this.rootSpan;
-		if (!span || span === NOOP_SPAN) return undefined;
-
-		return span.spanContext();
 	}
 
 	/**
@@ -442,225 +362,182 @@ export class Tracer {
 		this.rootSpan = null;
 	}
 
-	// ── Active Span ──────────────────────────────────────────────────────
+	// ── Scoped Span API (wrap / wrapSync) ────────────────────────────────
 
 	/**
-	 * Starts a span as a child of the root span and stores it as the
-	 * current active span. Only one active span exists at a time.
+	 * Executes an async function within a traced span, automatically
+	 * managing the span lifecycle.
 	 *
-	 * Operations started with `parent: "active"` will be parented under
-	 * this span.
+	 * The span is:
+	 *   1. Created as a child of the current context (tracked stack → ALS → root)
+	 *   2. Set as the current span in `AsyncLocalStorage` for the duration
+	 *   3. Ended with OK on success, or ERROR on exception
 	 *
-	 * @param name       - The span name (e.g. `"agent.prompt"`, `"pipeline.stage"`).
-	 * @param attributes - Optional key-value pairs attached to the span.
-	 * @returns The active span.
-	 */
-	startActiveSpan(
-		name: string,
-		attributes?: Record<string, SpanAttributeValue>,
-	): Span {
-		const span = this.startChildOfRoot(name, attributes);
-		this.activeSpan = span;
-		return span;
-	}
-
-	/**
-	 * Ends the active span and clears the active span slot.
+	 * Any nested `wrap()` calls automatically become children of this span.
 	 *
-	 * @param span  - The active span to end (should match the current active span).
-	 * @param error - Optional error. When provided, the span is marked ERROR.
-	 */
-	endActiveSpan(span: Span, error?: Error): void {
-		this.endSpanWithStatus(span, error);
-		this.activeSpan = null;
-	}
-
-	// ── Generic Span API ─────────────────────────────────────────────────
-
-	/**
-	 * Starts a named span with optional attributes and parent strategy.
-	 *
-	 * This is the generic, domain-agnostic entry point for tracing arbitrary
-	 * operations. New domain concepts can be traced without adding dedicated
-	 * methods to this class.
-	 *
-	 * @param name       - The span name (e.g. `"db.query"`, `"http.request"`).
-	 * @param attributes - Optional key-value pairs attached to the span.
-	 * @param parent     - Where to parent the span. Defaults to `"active"`.
-	 * @returns The started span, or `NOOP_SPAN` when tracing is disabled.
-	 *
-	 * @example
-	 * ```ts
-	 * const span = tracer.startOperation("rag.pipeline", {
-	 *   "rag.query": query.slice(0, 200),
-	 *   "rag.collection": collectionName,
-	 * }, "active");
-	 * ```
-	 */
-	startOperation(
-		name: string,
-		attributes?: Record<string, SpanAttributeValue>,
-		parent: ParentStrategy = "active",
-	): Span {
-		if (!this.tracer) return NOOP_SPAN;
-
-		const parentSpan = this.resolveParent(parent);
-		if (!parentSpan || parentSpan === NOOP_SPAN) return NOOP_SPAN;
-
-		const parentCtx = trace.setSpan(context.active(), parentSpan);
-		const span = this.tracer.startSpan(name, { attributes }, parentCtx);
-		this.spanParents.set(span, parentSpan);
-		return span;
-	}
-
-	/**
-	 * Ends a span, setting its status based on whether an error was provided.
-	 *
-	 * This is the generic counterpart to `startOperation`.
-	 *
-	 * @param span  - The span to end.
-	 * @param error - Optional error. When provided, the span is marked ERROR.
-	 */
-	endOperation(span: Span, error?: Error): void {
-		this.endSpanWithStatus(span, error);
-	}
-
-	/**
-	 * Executes an async function within a traced span, automatically ending
-	 * the span on success or error.
-	 *
-	 * This is a convenience wrapper around `startOperation`/`endOperation`
-	 * that eliminates the repetitive try/catch pattern.
-	 *
-	 * @param name       - The span name.
-	 * @param work       - The async function to execute.
-	 * @param options    - Optional configuration.
+	 * @param name - The span name (use `SpanName` enum values).
+	 * @param fnOrAttrs - Either the work function, or attributes for the span.
+	 * @param maybeFn - The work function (when attributes are provided).
 	 * @returns The result of the work function.
 	 *
 	 * @example
 	 * ```ts
-	 * const content = await tracer.traced("fs.read", async (span) => {
-	 *   const data = await readFile(path, "utf-8");
-	 *   span.setAttribute("fs.content_length", data.length);
-	 *   return data;
-	 * }, { attributes: { "fs.path": path }, parent: "active" });
+	 * // Without attributes
+	 * await tracer.wrap("db.query", async (span) => {
+	 *   const rows = await db.query(sql);
+	 *   span.setAttribute("db.row_count", rows.length);
+	 *   return rows;
+	 * });
+	 *
+	 * // With attributes
+	 * await tracer.wrap("http.request", { "http.url": url }, async (span) => {
+	 *   return await fetch(url);
+	 * });
 	 * ```
 	 */
-	async traced<T>(
+	async wrap<T>(
 		name: string,
-		work: (span: Span) => Promise<T>,
-		options?: {
-			attributes?: Record<string, SpanAttributeValue>;
-			parent?: ParentStrategy;
-		},
+		fnOrAttrs:
+			| ((span: Span) => Promise<T>)
+			| Record<string, SpanAttributeValue>,
+		maybeFn?: (span: Span) => Promise<T>,
 	): Promise<T> {
-		const span = this.startOperation(
-			name,
-			options?.attributes,
-			options?.parent,
-		);
-		this.enterSpan(span);
+		const { attrs, fn } = this.resolveWrapArgs(fnOrAttrs, maybeFn);
 
-		try {
-			const result = await work(span);
-			this.endSpanWithStatus(span);
-			return result;
-		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
-			this.endSpanWithStatus(span, error);
-			throw err;
-		} finally {
-			this.leaveSpan(span);
-		}
+		if (!this.tracer) return fn(NOOP_SPAN);
+
+		const parent = this.resolveParent();
+		if (!parent || parent === NOOP_SPAN) return fn(NOOP_SPAN);
+
+		const parentCtx = trace.setSpan(context.active(), parent);
+		const span = this.tracer.startSpan(name, { attributes: attrs }, parentCtx);
+		this.spanParents.set(span, parent);
+
+		return this.store.run({ span }, async () => {
+			try {
+				const result = await fn(span);
+				this.endSpanWithStatus(span);
+				return result;
+			} catch (err) {
+				const error = err instanceof Error ? err : new Error(String(err));
+				this.endSpanWithStatus(span, error);
+				throw err;
+			}
+		});
 	}
 
 	/**
 	 * Executes a synchronous function within a traced span, automatically
-	 * ending the span on success or error.
+	 * managing the span lifecycle.
 	 *
-	 * This is the synchronous counterpart to {@link traced}. It eliminates
-	 * the repetitive try/catch pattern for operations that do not need to
-	 * await anything.
+	 * This is the synchronous counterpart to {@link wrap}.
 	 *
-	 * @param name    - The span name.
-	 * @param work    - The synchronous function to execute.
-	 * @param options - Optional configuration.
+	 * @param name - The span name (use `SpanName` enum values).
+	 * @param fnOrAttrs - Either the work function, or attributes for the span.
+	 * @param maybeFn - The work function (when attributes are provided).
 	 * @returns The result of the work function.
 	 *
 	 * @example
 	 * ```ts
-	 * const parsed = tracer.tracedSync("json.parse", (span) => {
+	 * const parsed = tracer.wrapSync("json.parse", (span) => {
 	 *   const obj = JSON.parse(raw);
 	 *   span.setAttribute("json.keys", Object.keys(obj).length);
 	 *   return obj;
-	 * }, { attributes: { "json.length": raw.length }, parent: "active" });
+	 * });
 	 * ```
 	 */
-	tracedSync<T>(
+	wrapSync<T>(
 		name: string,
-		work: (span: Span) => T,
-		options?: {
-			attributes?: Record<string, SpanAttributeValue>;
-			parent?: ParentStrategy;
-		},
+		fnOrAttrs: ((span: Span) => T) | Record<string, SpanAttributeValue>,
+		maybeFn?: (span: Span) => T,
 	): T {
-		const span = this.startOperation(
-			name,
-			options?.attributes,
-			options?.parent,
-		);
-		this.enterSpan(span);
-		try {
-			const result = work(span);
-			this.endSpanWithStatus(span);
-			return result;
-		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
-			this.endSpanWithStatus(span, error);
-			throw err;
-		} finally {
-			this.leaveSpan(span);
-		}
-	}
+		const { attrs, fn } = this.resolveWrapArgs(fnOrAttrs, maybeFn);
 
-	// ── Span Tracking ────────────────────────────────────────────────────
+		if (!this.tracer) return fn(NOOP_SPAN);
 
-	/**
-	 * Tracks a span by ID so it can be retrieved and ended later.
-	 *
-	 * This is used by external helper functions for long-lived spans that
-	 * are started and ended at different call sites (e.g., tool call spans
-	 * started in one handler but ended when the tool completes).
-	 *
-	 * Non-recording spans (i.e., NOOP_SPAN when tracing is disabled) are
-	 * silently ignored — they are never stored.
-	 *
-	 * Empty-string IDs are silently ignored to prevent accidental key
-	 * collisions. If an ID already exists, the existing span is ended
-	 * with ERROR before being replaced.
-	 *
-	 * @param id    - Unique identifier for this span (e.g., toolCallId, terminalId).
-	 * @param span  - The span to track.
-	 * @param label - Human-readable label for error messages during forced cleanup
-	 *               (e.g., `"tool call"`, `"terminal"`). Defaults to `"operation"`.
-	 */
-	trackSpan(id: string, span: Span, label: string = "operation"): void {
-		if (!id) return;
-		if (span.isRecording()) {
-			const existing = this.trackedSpans.get(id);
-			if (existing?.span.isRecording()) {
-				existing.span.setStatus({
-					code: SpanStatusCode.ERROR,
-					message: `${existing.label} replaced before completion`,
-				});
-				existing.span.end();
+		const parent = this.resolveParent();
+		if (!parent || parent === NOOP_SPAN) return fn(NOOP_SPAN);
+
+		const parentCtx = trace.setSpan(context.active(), parent);
+		const span = this.tracer.startSpan(name, { attributes: attrs }, parentCtx);
+		this.spanParents.set(span, parent);
+
+		return this.store.run({ span }, () => {
+			try {
+				const result = fn(span);
+				this.endSpanWithStatus(span);
+				return result;
+			} catch (err) {
+				const error = err instanceof Error ? err : new Error(String(err));
+				this.endSpanWithStatus(span, error);
+				throw err;
 			}
-			this.trackedSpans.set(id, { span, label });
+		});
+	}
+
+	// ── Tracked Span API ─────────────────────────────────────────────────
+
+	/**
+	 * Starts a tracked span and activates it for context resolution.
+	 *
+	 * Tracked spans are for long-lived operations that start and end at
+	 * different call sites (e.g., tool calls, terminal sessions). The span
+	 * is:
+	 *   1. Created as a child of the current context
+	 *   2. Stored in the tracked registry by `id`
+	 *   3. Pushed onto the tracked span stack (active for context resolution)
+	 *
+	 * Use {@link endTracked} to end the span and remove it from the registry.
+	 * Use {@link deactivateTracked} / {@link activateTracked} to control
+	 * context activation without ending the span.
+	 *
+	 * Non-recording spans (NOOP_SPAN when tracing is disabled) are silently
+	 * ignored — they are never stored.
+	 *
+	 * @param id    - Unique identifier (e.g., toolCallId, terminalId).
+	 * @param name  - The span name (use `SpanName` enum values).
+	 * @param attributes - Optional span attributes.
+	 * @param label - Human-readable label for error messages during forced
+	 *               cleanup (e.g., `"tool call"`, `"terminal"`).
+	 * @returns The started span, or `NOOP_SPAN` when tracing is disabled.
+	 */
+	startTracked(
+		id: string,
+		name: string,
+		attributes?: Record<string, SpanAttributeValue>,
+		label: string = "operation",
+	): Span {
+		if (!id || !this.tracer) return NOOP_SPAN;
+
+		const parent = this.resolveParent();
+		if (!parent || parent === NOOP_SPAN) return NOOP_SPAN;
+
+		const parentCtx = trace.setSpan(context.active(), parent);
+		const span = this.tracer.startSpan(name, { attributes }, parentCtx);
+		this.spanParents.set(span, parent);
+
+		// End existing span with same ID if any
+		const existing = this.trackedSpans.get(id);
+		if (existing?.span.isRecording()) {
+			existing.span.setStatus({
+				code: SpanStatusCode.ERROR,
+				message: `${existing.label} replaced before completion`,
+			});
+			existing.span.end();
+			// Remove from stack
+			const idx = this.trackedSpanStack.lastIndexOf(existing.span);
+			if (idx !== -1) this.trackedSpanStack.splice(idx, 1);
 		}
+
+		// Store and activate
+		this.trackedSpans.set(id, { span, label });
+		this.trackedSpanStack.push(span);
+
+		return span;
 	}
 
 	/**
-	 * Retrieves a tracked span by its ID.
+	 * Retrieves a tracked span by its ID without removing it.
 	 *
 	 * Returns `undefined` if the ID is unknown, empty, or the span was
 	 * never tracked (e.g., because tracing was disabled).
@@ -674,97 +551,172 @@ export class Tracer {
 	}
 
 	/**
-	 * Removes and returns a tracked span by its ID.
+	 * Ends a tracked span, removes it from the registry and the context
+	 * stack, and sets its status based on whether an error was provided.
 	 *
-	 * This is typically called when the operation completes and the span
-	 * should be ended. Returns `undefined` if the ID is unknown or empty.
+	 * @param id    - The span's tracking ID.
+	 * @param error - Optional error. When provided, the span is marked ERROR.
+	 * @returns The ended span, or `undefined` if the ID was unknown.
+	 */
+	endTracked(id: string, error?: Error): Span | undefined {
+		if (!id) return undefined;
+
+		const entry = this.trackedSpans.get(id);
+		if (!entry) return undefined;
+
+		this.trackedSpans.delete(id);
+
+		// Remove from context stack
+		const idx = this.trackedSpanStack.lastIndexOf(entry.span);
+		if (idx !== -1) this.trackedSpanStack.splice(idx, 1);
+
+		// End with status
+		this.endSpanWithStatus(entry.span, error);
+
+		return entry.span;
+	}
+
+	/**
+	 * Removes a tracked span from the context stack without ending it.
+	 *
+	 * The span remains in the tracked registry and can be re-activated
+	 * later via {@link activateTracked}. This is used for spans that
+	 * should not continuously affect context resolution (e.g., terminal
+	 * spans that run in the background).
 	 *
 	 * @param id - The span's tracking ID.
-	 * @returns The removed span, or `undefined`.
 	 */
-	removeTrackedSpan(id: string): Span | undefined {
-		if (!id) return undefined;
+	deactivateTracked(id: string): void {
+		if (!id) return;
 		const entry = this.trackedSpans.get(id);
-		if (entry) {
-			this.trackedSpans.delete(id);
-			return entry.span;
+		if (!entry) return;
+
+		const idx = this.trackedSpanStack.lastIndexOf(entry.span);
+		if (idx !== -1) this.trackedSpanStack.splice(idx, 1);
+	}
+
+	/**
+	 * Pushes a tracked span back onto the context stack.
+	 *
+	 * This re-activates a span that was previously deactivated via
+	 * {@link deactivateTracked}, making it the current span for context
+	 * resolution.
+	 *
+	 * @param id - The span's tracking ID.
+	 */
+	activateTracked(id: string): void {
+		if (!id) return;
+		const entry = this.trackedSpans.get(id);
+		if (!entry || !entry.span.isRecording()) return;
+
+		if (!this.trackedSpanStack.includes(entry.span)) {
+			this.trackedSpanStack.push(entry.span);
 		}
-		return undefined;
+	}
+
+	// ── Context ──────────────────────────────────────────────────────────
+
+	/**
+	 * Returns the current trace context for log correlation.
+	 *
+	 * Resolution order: tracked span stack → ALS span → root span.
+	 *
+	 * When tracing is disabled, returns `undefined`.
+	 *
+	 * @example
+	 * ```ts
+	 * const ctx = tracer.getContext();
+	 * // { TraceId: "abc…", SpanId: "def…", ParentSpanId: "012…" }
+	 * if (ctx) logger.info({ ...ctx }, "Something happened");
+	 * ```
+	 */
+	getContext(): TraceContext | undefined {
+		if (!this.enabled) return undefined;
+
+		const span = this.resolveParent();
+		if (!span || span === NOOP_SPAN) return undefined;
+
+		const ctx: SpanContext = span.spanContext();
+		const parent = this.spanParents.get(span);
+
+		const result: TraceContext = {
+			TraceId: ctx.traceId,
+			SpanId: ctx.spanId,
+		};
+
+		if (parent && parent !== NOOP_SPAN) {
+			result.ParentSpanId = parent.spanContext().spanId;
+		}
+
+		return result;
+	}
+
+	/**
+	 * Returns the current span from context resolution, or `undefined`.
+	 *
+	 * Useful when you need to set attributes on the current span without
+	 * creating a new child span.
+	 */
+	currentSpan(): Span | undefined {
+		const span = this.resolveParent();
+		if (!span || span === NOOP_SPAN) return undefined;
+		return span;
 	}
 
 	// ── Event Recording ──────────────────────────────────────────────────
 
 	/**
-	 * Adds an event to the span resolved by the given parent strategy.
+	 * Adds an event to the current span (tracked stack → ALS → root).
 	 *
-	 * This is used by external helper functions to record domain events
-	 * (e.g., context injection, usage updates) on the appropriate span
-	 * without needing access to the span reference directly.
-	 *
-	 * @param target     - Which span to attach the event to.
 	 * @param eventName  - The event name (e.g., `"context.injected"`).
 	 * @param attributes - Optional event attributes.
 	 */
 	recordEvent(
-		target: ParentStrategy,
 		eventName: string,
 		attributes?: Record<string, SpanAttributeValue>,
 	): void {
-		const span = this.resolveParent(target);
+		const span = this.resolveParent();
 		if (!span || span === NOOP_SPAN) return;
-
 		span.addEvent(eventName, attributes);
 	}
 
-	// ── Span Context Stack ───────────────────────────────────────────────
-
 	/**
-	 * Pushes a span onto the context stack, making it the "current" span
-	 * for log correlation via {@link getTraceContext}.
+	 * Adds an event to the root span specifically.
 	 *
-	 * Call {@link leaveSpan} when the span's scope ends (e.g., after a
-	 * tool call completes or a permission is resolved). Non-recording
-	 * spans (i.e., `NOOP_SPAN`) are silently ignored.
+	 * Use this when you want to record an event on the root span regardless
+	 * of the current context (e.g., pool-level events).
 	 *
-	 * Duplicate entries are prevented — entering an already-entered span
-	 * is a no-op.
-	 *
-	 * @param span - The span to enter.
-	 *
-	 * @example
-	 * ```ts
-	 * const toolSpan = tracer.startOperation("agent.tool_call", { ... }, "active");
-	 * tracer.enterSpan(toolSpan);
-	 * logger.info("Tool started");   // ← log carries toolSpan's SpanId
-	 * // ... work ...
-	 * tracer.leaveSpan(toolSpan);
-	 * tracer.endOperation(toolSpan);
-	 * ```
+	 * @param eventName  - The event name.
+	 * @param attributes - Optional event attributes.
 	 */
-	enterSpan(span: Span): void {
-		if (span === NOOP_SPAN || !span.isRecording()) return;
-		if (!this.spanStack.includes(span)) {
-			this.spanStack.push(span);
-		}
-	}
-
-	/**
-	 * Removes a span from the context stack.
-	 *
-	 * Uses identity-based removal (not LIFO pop) so that out-of-order
-	 * leaves are handled gracefully. If the span is not in the stack,
-	 * this is a silent no-op.
-	 *
-	 * @param span - The span to leave.
-	 */
-	leaveSpan(span: Span): void {
-		const idx = this.spanStack.lastIndexOf(span);
-		if (idx !== -1) {
-			this.spanStack.splice(idx, 1);
-		}
+	recordRootEvent(
+		eventName: string,
+		attributes?: Record<string, SpanAttributeValue>,
+	): void {
+		if (!this.rootSpan || this.rootSpan === NOOP_SPAN) return;
+		this.rootSpan.addEvent(eventName, attributes);
 	}
 
 	// ── Flush & Shutdown ─────────────────────────────────────────────────
+
+	/**
+	 * Forces the provider to export all pending spans **without** ending
+	 * any active spans or clearing any state.
+	 *
+	 * Use this when you need to ensure that all spans completed so far
+	 * have been delivered to the backend but the tracer is still in use.
+	 *
+	 * Export errors are swallowed — telemetry is best-effort.
+	 */
+	async forceExport(): Promise<void> {
+		if (this.provider) {
+			try {
+				await this.provider.forceFlush();
+			} catch {
+				// Telemetry export is best-effort — silently ignore failures.
+			}
+		}
+	}
 
 	/**
 	 * Ends all lingering spans and flushes them to the exporter, but does
@@ -776,8 +728,8 @@ export class Tracer {
 	 * @see {@link shutdown} — calls `flush()` then tears down the provider.
 	 */
 	async flush(): Promise<void> {
-		// Clear the span context stack — no more log correlation after flush
-		this.spanStack.length = 0;
+		// Clear the tracked span stack
+		this.trackedSpanStack.length = 0;
 
 		let hadLingeringSpans = false;
 
@@ -792,26 +744,13 @@ export class Tracer {
 			this.trackedSpans.delete(id);
 		}
 
-		// End active span if still active
-		if (this.activeSpan && this.activeSpan !== NOOP_SPAN) {
-			hadLingeringSpans = true;
-			this.activeSpan.setStatus({
-				code: SpanStatusCode.ERROR,
-				message: "Destroyed while active span was in progress",
-			});
-			this.activeSpan.end();
-			this.activeSpan = null;
-		}
-
 		// End root span — ERROR if any children were forcefully terminated
 		this.endRootSpan(
 			hadLingeringSpans ? "error" : "ok",
 			hadLingeringSpans ? "Session ended with lingering spans" : undefined,
 		);
 
-		// Flush pending spans to the exporter (does NOT clear the exporter).
-		// Swallow export errors (e.g. OTLP endpoint unreachable / bad request)
-		// so that telemetry failures never crash the application.
+		// Flush pending spans to the exporter
 		if (this.provider) {
 			try {
 				await this.provider.forceFlush();
@@ -833,8 +772,6 @@ export class Tracer {
 	async shutdown(): Promise<void> {
 		await this.flush();
 
-		// Tear down the provider (also calls exporter.shutdown → clears spans).
-		// Swallow export errors so that telemetry failures never crash the app.
 		if (this.provider) {
 			try {
 				await this.provider.shutdown();
@@ -849,39 +786,41 @@ export class Tracer {
 	// ── Private Helpers ──────────────────────────────────────────────────
 
 	/**
-	 * Resolves a parent strategy to an actual span reference.
+	 * Resolves the current parent span from context.
+	 *
+	 * Priority: tracked span stack → ALS span → root span.
 	 */
-	private resolveParent(parent: ParentStrategy): Span | null {
-		if (typeof parent === "object") {
-			// Explicit Span reference
-			return parent;
-		}
-
-		switch (parent) {
-			case "root":
-				return this.rootSpan;
-			case "active":
-				return this.spanStack.at(-1) ?? this.activeSpan ?? this.rootSpan;
-			default:
-				return this.rootSpan;
-		}
+	private resolveParent(): Span | null {
+		return (
+			this.trackedSpanStack.at(-1) ??
+			this.store.getStore()?.span ??
+			this.rootSpan
+		);
 	}
 
 	/**
-	 * Starts a span as a child of the root span.
+	 * Resolves overloaded arguments for `wrap()` / `wrapSync()`.
+	 *
+	 * Supports two signatures:
+	 *   - `wrap(name, fn)` — no attributes
+	 *   - `wrap(name, attrs, fn)` — with attributes
 	 */
-	private startChildOfRoot(
-		name: string,
-		attributes?: Record<string, string | number | boolean>,
-	): Span {
-		if (!this.tracer || !this.rootSpan || this.rootSpan === NOOP_SPAN) {
-			return NOOP_SPAN;
+	private resolveWrapArgs<T>(
+		fnOrAttrs: ((span: Span) => T) | Record<string, SpanAttributeValue>,
+		maybeFn?: (span: Span) => T,
+	): {
+		attrs: Record<string, SpanAttributeValue> | undefined;
+		fn: (span: Span) => T;
+	} {
+		if (typeof fnOrAttrs === "function") {
+			return { attrs: undefined, fn: fnOrAttrs };
 		}
-
-		const parentCtx = trace.setSpan(context.active(), this.rootSpan);
-		const span = this.tracer.startSpan(name, { attributes }, parentCtx);
-		this.spanParents.set(span, this.rootSpan);
-		return span;
+		if (!maybeFn) {
+			throw new Error(
+				"A function argument is required when passing attributes",
+			);
+		}
+		return { attrs: fnOrAttrs, fn: maybeFn };
 	}
 
 	/**

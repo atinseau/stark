@@ -44,4 +44,14 @@ export enum PoolEvent {
 
 	/** The pool has been destroyed. */
 	DESTROYED = "pool:destroyed",
+
+	/**
+	 * An agent in the pool requires user approval to proceed with a tool call.
+	 *
+	 * Only emitted when `agentConfig.autoApprove` is `false`. The event
+	 * payload includes a `resolve(boolean)` callback that the listener
+	 * MUST invoke to approve or deny the request. The requesting agent
+	 * blocks until resolved — other agents continue unaffected.
+	 */
+	APPROVE_REQUEST = "pool:approve-request",
 }

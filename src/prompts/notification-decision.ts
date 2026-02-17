@@ -3,13 +3,12 @@ import "./helpers.ts";
 
 // ── Notification Decision: User Prompt ─────────────────────────────────────
 
-const NOTIFICATION_DECISION_SOURCE = `A context change occurred in the agent pool. Determine if the user should be notified.
+const NOTIFICATION_DECISION_SOURCE = `Determine if the user should be notified about this agent pool context change.
 
-## User Notification Preference
+## User Preference
 - **Enabled**: {{preference.enabled}}
-- **Minimum Significance**: {{preference.minSignificance}}
-{{#if preference.types}}
-- **Interested In**: {{#each preference.types}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+- **Min Significance**: {{preference.minSignificance}}
+{{#if preference.types}}- **Interested Types**: {{#each preference.types}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
 {{/if}}
 
 ## Delta
@@ -18,21 +17,19 @@ const NOTIFICATION_DECISION_SOURCE = `A context change occurred in the agent poo
 - **Summary**: {{delta.summary}}
 - **Significance**: {{delta.significance}}
 
-## Agent's Task
+## Agent Task
 {{agentTask}}
 
-## Decision Criteria
+## Criteria
+1. Does delta meet minimum significance?
+2. Does delta type match user's interests (if specified)?
+3. Is this genuinely useful vs. noise?
 
-1. Does the delta meet the user's minimum significance threshold?
-2. If the user specified interested types, does this delta match?
-3. Is this notification genuinely useful vs. noise?
-4. Craft a concise, informative notification message if warranted.
-
-Respond with valid JSON only:
+## JSON Output
 {
   "shouldNotify": true | false,
-  "reasoning": "<why the user should or shouldn't be notified>",
-  "message": "<the notification message, if shouldNotify is true>"
+  "reasoning": "<why>",
+  "message": "<notification message if shouldNotify is true>"
 }`;
 
 export const notificationDecisionPrompt = Handlebars.compile(

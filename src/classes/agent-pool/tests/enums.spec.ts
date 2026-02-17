@@ -30,6 +30,7 @@ describe("Pool Enums", () => {
 		);
 		expect(PoolEvent.ERROR as string).toBe("pool:error");
 		expect(PoolEvent.DESTROYED as string).toBe("pool:destroyed");
+		expect(PoolEvent.APPROVE_REQUEST as string).toBe("pool:approve-request");
 	});
 
 	it("ConversationRole has all expected roles", () => {
@@ -73,6 +74,7 @@ describe("Pool Enums", () => {
 		expect(UserIntent.STATUS_QUERY as string).toBe("status_query");
 		expect(UserIntent.CONTEXT_INJECTION as string).toBe("context_injection");
 		expect(UserIntent.CANCEL as string).toBe("cancel");
+		expect(UserIntent.APPROVE_AGENT as string).toBe("approve_agent");
 		expect(UserIntent.UNKNOWN as string).toBe("unknown");
 	});
 });

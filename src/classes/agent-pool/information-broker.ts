@@ -7,6 +7,7 @@ import type {
 	SharingDecision,
 	TaskDependency,
 } from "../../types/agent-pool.types.ts";
+import { toErrorMessage } from "../../utils/errors.ts";
 import type { ContextTracker } from "./context-tracker.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
@@ -153,7 +154,7 @@ export class InformationBroker {
 			significanceThreshold?: number;
 		},
 	) {
-		this.significanceThreshold = options?.significanceThreshold ?? 0.4;
+		this.significanceThreshold = options?.significanceThreshold ?? 0.6;
 	}
 
 	// ── Public API ─────────────────────────────────────────────────────
@@ -453,7 +454,7 @@ export class InformationBroker {
 				{
 					sourceAgentId: sourceState.agentId,
 					targetAgentId: targetState.agentId,
-					error: error instanceof Error ? error.message : String(error),
+					error: toErrorMessage(error),
 				},
 				"Sharing evaluation LLM call failed",
 			);
@@ -461,7 +462,7 @@ export class InformationBroker {
 			// On failure, default to not sharing (safe default)
 			return {
 				shouldShare: false,
-				reasoning: `Evaluation failed: ${error instanceof Error ? error.message : String(error)}`,
+				reasoning: `Evaluation failed: ${toErrorMessage(error)}`,
 				sourceAgentId: sourceState.agentId,
 				targetAgentId: targetState.agentId,
 				information: "",

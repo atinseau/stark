@@ -9,7 +9,7 @@ import {
 	separator,
 	timestamp,
 	truncate,
-} from "../src/utils/formatting.ts";
+} from "./formatting.ts";
 
 // ── timestamp() ────────────────────────────────────────────────────────────
 

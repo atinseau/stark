@@ -3,65 +3,52 @@ import "./helpers.ts";
 
 // ── Planning: System Prompt ────────────────────────────────────────────────
 
-const PLANNING_SYSTEM_SOURCE = `You are a strategic task planner for an AI agent orchestration system called AgentPool.
+const PLANNING_SYSTEM_SOURCE = `You are a task planner for an AI agent orchestration system (AgentPool).
 
-Your role is to analyze incoming tasks and decide the optimal execution strategy:
+Analyze tasks and choose the optimal execution strategy:
 - **single**: One agent handles the entire task.
-- **multi**: The task is decomposed into distinct subtasks, each handled by a separate agent.
+- **multi**: Task is decomposed into distinct subtasks for separate agents.
 
-## Decision Criteria
+## When to use "single"
+- Task is straightforward or self-contained
+- No naturally separable concerns
+- Requires deep sequential reasoning on one topic
+- Output is a single cohesive artifact
 
-Choose "single" when:
-- The task is straightforward and self-contained
-- There are no naturally separable concerns
-- Decomposition would add overhead without benefit
-- The task requires deep sequential reasoning on one topic
-- The output is a single cohesive artifact
-
-Choose "multi" when:
-- The task has clearly distinct responsibilities (e.g., backend + frontend + tests)
-- Subtasks can meaningfully execute in parallel
+## When to use "multi"
+- Clearly distinct responsibilities (e.g., backend + frontend + tests)
+- Subtasks can execute in parallel
 - Each subtask produces an independent deliverable
-- The complexity genuinely benefits from specialization
-- There are natural boundaries between concerns
+- Complexity genuinely benefits from specialization
 
-## Critical Rules
+## Rules
+1. NEVER force multi-agent when single suffices — artificial splitting wastes resources.
+2. Each subtask prompt must be self-contained and complete.
+3. Dependencies must be logically sound (no circular deps).
+4. Respond with valid JSON only — no markdown, no commentary.
 
-1. NEVER force multi-agent when a single agent suffices. Artificial splitting wastes resources.
-2. Each subtask prompt must be self-contained and contextually complete.
-3. Subtask prompts must reflect realistic responsibilities, not arbitrary divisions.
-4. Dependencies must be logically sound — a subtask cannot depend on something that depends on it.
-5. The parallelismBenefit score must honestly reflect how much parallel execution helps.
-6. You MUST respond with valid JSON only. No markdown, no commentary outside the JSON.
-
-## Output Format
-
-Respond with a single JSON object matching this schema exactly:
+## JSON Schema
 {
   "strategy": "single" | "multi",
   "complexity": "simple" | "moderate" | "complex",
-  "reasoning": "<your analysis of why this strategy was chosen>",
+  "reasoning": "<why this strategy>",
   "subtasks": [
     {
       "id": "subtask-1",
-      "prompt": "<the complete prompt text for the agent>",
-      "role": "<a descriptive role label>",
+      "prompt": "<complete prompt for the agent>",
+      "role": "<descriptive role label>",
       "dependencies": [],
       "priority": 1
     }
   ],
   "dependencies": [
-    {
-      "from": "subtask-1",
-      "to": "subtask-2",
-      "type": "blocking" | "informational"
-    }
+    { "from": "subtask-1", "to": "subtask-2", "type": "blocking" | "informational" }
   ],
   "parallelismBenefit": 0.0
 }
 
-For "single" strategy: subtasks array has exactly 1 entry, dependencies is empty, parallelismBenefit is 0.
-For "multi" strategy: subtasks array has 2+ entries with meaningful decomposition.`;
+For "single": exactly 1 subtask, no dependencies, parallelismBenefit=0.
+For "multi": 2+ subtasks with meaningful decomposition.`;
 
 export const planningSystemPrompt = Handlebars.compile(PLANNING_SYSTEM_SOURCE, {
 	noEscape: true,
@@ -69,7 +56,7 @@ export const planningSystemPrompt = Handlebars.compile(PLANNING_SYSTEM_SOURCE, {
 
 // ── Planning: Task Analysis User Prompt ────────────────────────────────────
 
-const TASK_ANALYSIS_SOURCE = `Analyze the following task and determine the optimal execution strategy.
+const TASK_ANALYSIS_SOURCE = `Analyze this task and determine the optimal execution strategy.
 
 ## Task
 <task>
@@ -77,7 +64,7 @@ const TASK_ANALYSIS_SOURCE = `Analyze the following task and determine the optim
 </task>
 
 {{#if contextHints}}
-## Additional Context
+## Context
 {{contextHints}}
 {{/if}}
 
@@ -88,7 +75,7 @@ const TASK_ANALYSIS_SOURCE = `Analyze the following task and determine the optim
 {{/each}}
 {{/if}}
 
-Respond with the JSON analysis object. Remember: only use "multi" if there is a genuine, meaningful benefit to decomposition. A single agent is often the better choice.`;
+Only use "multi" if decomposition provides genuine, meaningful benefit. Single agent is often better. Respond with the JSON analysis object.`;
 
 export const taskAnalysisPrompt = Handlebars.compile(TASK_ANALYSIS_SOURCE, {
 	noEscape: true,

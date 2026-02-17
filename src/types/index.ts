@@ -16,6 +16,7 @@ export type {
 	AgentEventPayload,
 	AgentIdleEvent,
 	AgentReadyEvent,
+	ApproveRequestEvent,
 	BaseAgentEvent,
 	ConfigUpdateEvent,
 	ContextInjectedEvent,

@@ -7,6 +7,7 @@
  *   - `tool:*`       → Tool call events
  *   - `plan:*`       → Execution plan events
  *   - `permission:*` → Permission request/response events
+ *   - `approve:*`    → Interactive approval events (when autoApprove is false)
  *   - `terminal:*`   → Terminal lifecycle events
  *   - `fs:*`         → File system operation events
  *   - `usage:*`      → Token usage and cost events
@@ -58,6 +59,14 @@ export enum AgentEvent {
 	PERMISSION_GRANTED = "permission:granted",
 	/** A permission request was denied (no allow option or cancelled). */
 	PERMISSION_DENIED = "permission:denied",
+
+	// ── Approval (interactive) ───────────────────────────────────────────
+	/**
+	 * Emitted when `autoApprove` is `false` and the agent needs permission
+	 * to proceed. Listeners must call `event.resolve(true)` to approve or
+	 * `event.resolve(false)` to deny the request.
+	 */
+	APPROVE_REQUEST = "approve:request",
 
 	// ── Terminal ─────────────────────────────────────────────────────────
 	/** A new terminal was created to run a command. */

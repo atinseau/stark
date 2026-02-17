@@ -631,6 +631,21 @@ export interface AgentPoolState {
 
 	/** Total sharing decisions made. */
 	readonly sharingDecisionCount: number;
+
+	/**
+	 * Pending approval requests from agents waiting for user authorization.
+	 *
+	 * Only populated when `agentConfig.autoApprove` is `false`.
+	 * Each entry represents a tool call that an agent is blocked on,
+	 * waiting for the user to approve or deny.
+	 */
+	readonly pendingApprovals: Array<{
+		readonly agentId: string;
+		readonly agentName: string;
+		readonly toolCallId: string;
+		readonly toolCallTitle: string;
+		readonly timestamp: string;
+	}>;
 }
 
 // ── Pool Event Map ─────────────────────────────────────────────────────────
@@ -714,6 +729,34 @@ export interface PoolDestroyedEvent extends BasePoolEvent {
 	readonly event: PoolEvent.DESTROYED;
 }
 
+/**
+ * Emitted when an agent requires user approval to proceed with a tool call.
+ *
+ * Only emitted when `agentConfig.autoApprove` is `false`. The `resolve`
+ * callback MUST be invoked to approve (`true`) or deny (`false`) the
+ * request. The requesting agent blocks until resolved — other agents
+ * in the pool continue executing unaffected.
+ *
+ * Approvals can also be resolved via `pool.send()` using natural
+ * language (e.g. "yes, continue" or "authorize Agent-X").
+ */
+export interface ApproveRequestPoolEvent extends BasePoolEvent {
+	readonly event: PoolEvent.APPROVE_REQUEST;
+	/** The agent requesting approval. */
+	readonly agentId: string;
+	/** The agent's human-friendly name. */
+	readonly agentName: string;
+	/** The tool call that requires approval. */
+	readonly toolCallId: string;
+	/** Human-readable title of the tool call. */
+	readonly toolCallTitle: string;
+	/**
+	 * Callback to approve (`true`) or deny (`false`) the request.
+	 * Calling this unblocks the agent. Can only be called once.
+	 */
+	readonly resolve: (approved: boolean) => void;
+}
+
 /** Maps each PoolEvent to its corresponding payload type. */
 export interface PoolEventMap {
 	[PoolEvent.TASK_RECEIVED]: TaskReceivedEvent;
@@ -729,4 +772,5 @@ export interface PoolEventMap {
 	[PoolEvent.EXECUTION_COMPLETE]: ExecutionCompleteEvent;
 	[PoolEvent.ERROR]: PoolErrorEvent;
 	[PoolEvent.DESTROYED]: PoolDestroyedEvent;
+	[PoolEvent.APPROVE_REQUEST]: ApproveRequestPoolEvent;
 }
