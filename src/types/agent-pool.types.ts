@@ -56,6 +56,13 @@ export interface ChatOptions {
 
 	/** Whether to request JSON output mode. Defaults to false. */
 	readonly jsonMode?: boolean;
+
+	/** Override the max JSON correction attempts for this request.
+	 *  When set, takes precedence over the client-level maxJsonAttempts. */
+	readonly maxJsonAttempts?: number;
+
+	/** Override the model for this request. */
+	readonly model?: string;
 }
 
 // ── Conversation Types ─────────────────────────────────────────────────────
@@ -73,6 +80,9 @@ export interface Conversation {
 
 	/** Total tokens consumed by this conversation (estimated). */
 	tokenCount: number;
+
+	/** Optional model override for this conversation role. */
+	model?: string;
 }
 
 // ── Task Planning Types ────────────────────────────────────────────────────
@@ -456,6 +466,24 @@ export interface AgentPoolConfig {
 	 * Defaults to 0.2.
 	 */
 	readonly temperature?: number;
+
+	/**
+	 * Optional per-conversation-role model overrides.
+	 *
+	 * When provided, the specified model will be used for all LLM calls
+	 * within that conversation role, instead of the pool's default model.
+	 * Useful for routing simple classification tasks (intent, sharing)
+	 * to a faster/cheaper model while keeping the main model for planning.
+	 *
+	 * @example
+	 * ```ts
+	 * modelOverrides: {
+	 *   [ConversationRole.INTENT_ANALYZER]: "openai/gpt-4o-mini",
+	 *   [ConversationRole.CONTEXT_ANALYZER]: "openai/gpt-4o-mini",
+	 * }
+	 * ```
+	 */
+	readonly modelOverrides?: Partial<Record<ConversationRole, string>>;
 
 	/**
 	 * Optional factory function for creating agents.

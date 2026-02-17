@@ -313,6 +313,7 @@ export class NotificationEngine {
 				ConversationRole.CONTEXT_ANALYZER,
 				prompt,
 				validateNotificationDecision,
+				{ maxTokens: 200, maxJsonAttempts: 2 },
 			);
 
 			if (!decision) {

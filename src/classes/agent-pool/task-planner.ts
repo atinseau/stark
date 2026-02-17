@@ -313,12 +313,14 @@ export class TaskPlanner {
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly logger: pino.Logger,
+		plannerModel?: string,
 	) {
 		// Register the planner conversation if not already present
 		if (!this.conversations.has(ConversationRole.PLANNER)) {
 			this.conversations.register(
 				ConversationRole.PLANNER,
 				planningSystemPrompt({}),
+				plannerModel,
 			);
 		}
 	}

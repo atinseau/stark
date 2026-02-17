@@ -200,7 +200,7 @@ export class OpenRouterClient {
 	): Promise<string> {
 		const response = await this.sdk.chat.send({
 			chatGenerationParams: {
-				model: this.model,
+				model: options?.model ?? this.model,
 				messages: messages.map((m) => this.toSdkMessage(m)),
 				temperature: options?.temperature ?? this.temperature,
 				maxTokens: options?.maxTokens ?? this.maxTokens ?? undefined,
@@ -250,7 +250,9 @@ export class OpenRouterClient {
 		let lastRaw = "";
 		let conversationMessages = [...messages];
 
-		for (let attempt = 0; attempt < this.maxJsonAttempts; attempt++) {
+		const effectiveMaxAttempts =
+			options?.maxJsonAttempts ?? this.maxJsonAttempts;
+		for (let attempt = 0; attempt < effectiveMaxAttempts; attempt++) {
 			const raw = await this.chat(conversationMessages, jsonOptions);
 			lastRaw = raw;
 
@@ -297,7 +299,7 @@ export class OpenRouterClient {
 		}
 
 		throw new JsonValidationError(
-			`Failed to get valid JSON from OpenRouter after ${this.maxJsonAttempts} attempts`,
+			`Failed to get valid JSON from OpenRouter after ${effectiveMaxAttempts} attempts`,
 			lastRaw,
 		);
 	}

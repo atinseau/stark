@@ -1,3 +1,4 @@
+export { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 export {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
@@ -13,6 +14,7 @@ export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
 // ── Template Index ─────────────────────────────────────────────────────────
 
+import { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 import {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
@@ -44,6 +46,7 @@ export const templates = {
 
 	// Information sharing
 	sharingDecision: sharingDecisionPrompt,
+	batchedSharingDecision: batchedSharingDecisionPrompt,
 
 	// Notifications
 	notificationDecision: notificationDecisionPrompt,

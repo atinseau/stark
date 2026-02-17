@@ -1,6 +1,6 @@
 import type pino from "pino";
 import { ConversationRole } from "../../enums/conversation-role.enum.ts";
-import { sharingDecisionPrompt } from "../../prompts/index.ts";
+import { batchedSharingDecisionPrompt } from "../../prompts/index.ts";
 import type {
 	AgentContextState,
 	ContextDelta,
@@ -11,39 +11,79 @@ import { toErrorMessage } from "../../utils/errors.ts";
 import type { ContextTracker } from "./context-tracker.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 
+// ── Constants ──────────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of target agents to evaluate in a single batched LLM call.
+ * Prevents prompt saturation when many agents are active.
+ * Candidates beyond this limit are evaluated in additional batched calls.
+ */
+const MAX_AGENT_EVALUATION_BUFFER_SIZE = 5;
+
 // ── Validators ─────────────────────────────────────────────────────────────
 
 /**
- * Validates that a raw parsed JSON value conforms to the internal
+ * Validates that a raw parsed JSON value conforms to the batched
  * sharing decision schema returned by the context-analyzer LLM.
+ *
+ * Expects an object with a `decisions` array where each element has:
+ * - `targetAgentId`: non-empty string
+ * - `shouldShare`: boolean
+ * - `reasoning`: non-empty string
+ * - `information`: non-empty string when `shouldShare` is true
  *
  * Returns `null` on invalid data so the OpenRouter client can
  * retry with a correction prompt.
  */
-function validateSharingDecision(
+function validateBatchedSharingDecision(
 	data: unknown,
-): Omit<SharingDecision, "sourceAgentId" | "targetAgentId"> | null {
+): Array<{
+	targetAgentId: string;
+	shouldShare: boolean;
+	reasoning: string;
+	information: string;
+}> | null {
 	if (data == null || typeof data !== "object") return null;
 
 	const obj = data as Record<string, unknown>;
 
-	if (typeof obj.shouldShare !== "boolean") return null;
-	if (typeof obj.reasoning !== "string" || obj.reasoning.length === 0) {
-		return null;
-	}
+	if (!Array.isArray(obj.decisions)) return null;
 
-	// information is required when shouldShare is true
-	if (obj.shouldShare) {
-		if (typeof obj.information !== "string" || obj.information.length === 0) {
+	const results: Array<{
+		targetAgentId: string;
+		shouldShare: boolean;
+		reasoning: string;
+		information: string;
+	}> = [];
+
+	for (const entry of obj.decisions) {
+		if (entry == null || typeof entry !== "object") return null;
+
+		const item = entry as Record<string, unknown>;
+
+		if (
+			typeof item.targetAgentId !== "string" ||
+			item.targetAgentId.length === 0
+		)
 			return null;
+		if (typeof item.shouldShare !== "boolean") return null;
+		if (typeof item.reasoning !== "string" || item.reasoning.length === 0)
+			return null;
+
+		if (item.shouldShare) {
+			if (typeof item.information !== "string" || item.information.length === 0)
+				return null;
 		}
+
+		results.push({
+			targetAgentId: item.targetAgentId as string,
+			shouldShare: item.shouldShare,
+			reasoning: item.reasoning as string,
+			information: typeof item.information === "string" ? item.information : "",
+		});
 	}
 
-	return {
-		shouldShare: obj.shouldShare,
-		reasoning: obj.reasoning as string,
-		information: typeof obj.information === "string" ? obj.information : "",
-	};
+	return results;
 }
 
 // ── InformationBroker ──────────────────────────────────────────────────────
@@ -68,13 +108,11 @@ function validateSharingDecision(
  *    the task dependency graph to find agents with declared
  *    `blocking` or `informational` dependencies on the source.
  *
- * 3. **Consults the LLM**: For each candidate target, sends a
- *    structured prompt to the context-analyzer conversation with:
- *    - The source agent's state and delta
- *    - The target agent's state and task
- *    - The dependency relationship (if any)
- *    The LLM decides whether sharing is beneficial and, if so,
- *    distills the relevant information into a concise instruction.
+ * 3. **Consults the LLM**: Sends a batched prompt to the
+ *    context-analyzer conversation with the source agent's state,
+ *    delta, and all candidate targets in a single request. The LLM
+ *    decides for each target whether sharing is beneficial and, if
+ *    so, distills the relevant information into a concise instruction.
  *
  * 4. **Returns decisions**: Each `SharingDecision` includes:
  *    - Whether to share (`shouldShare`)
@@ -100,6 +138,13 @@ function validateSharingDecision(
  * significance threshold. Deltas below this threshold are silently
  * skipped — only deltas that cross the threshold are evaluated
  * against candidate targets.
+ *
+ * ## Batched Evaluation
+ *
+ * To reduce the number of LLM calls, the broker evaluates multiple
+ * candidate targets in a single batched prompt. The batch size is
+ * controlled by {@link MAX_AGENT_EVALUATION_BUFFER_SIZE} to prevent
+ * prompt saturation when many agents are active.
  *
  * ## Conversation Isolation
  *
@@ -209,47 +254,18 @@ export class InformationBroker {
 			return [];
 		}
 
-		// Evaluate each candidate in parallel
-		const evaluationPromises = candidates.map((candidate) =>
-			this.evaluateCandidate(delta, sourceState, candidate),
-		);
-
-		const decisions = await Promise.allSettled(evaluationPromises);
-
-		// Collect successful evaluations
+		// Evaluate candidates in batches to avoid prompt saturation
 		const results: SharingDecision[] = [];
-		for (const result of decisions) {
-			if (result.status === "fulfilled" && result.value) {
-				results.push(result.value);
-			} else if (result.status === "rejected") {
-				this.logger.warn(
-					{
-						error:
-							result.reason instanceof Error
-								? result.reason.message
-								: String(result.reason),
-					},
-					"Sharing evaluation failed for a candidate",
-				);
-			}
-		}
 
-		// Log summary
-		const shareCount = results.filter((d) => d.shouldShare).length;
-		if (results.length > 0) {
-			this.logger.info(
-				{
-					sourceAgentId: delta.agentId,
-					deltaType: delta.type,
-					candidatesEvaluated: candidates.length,
-					sharingApproved: shareCount,
-				},
-				`Sharing evaluation: ${shareCount}/${candidates.length} candidates approved`,
-			);
+		for (
+			let i = 0;
+			i < candidates.length;
+			i += MAX_AGENT_EVALUATION_BUFFER_SIZE
+		) {
+			const batch = candidates.slice(i, i + MAX_AGENT_EVALUATION_BUFFER_SIZE);
+			const batchResults = await this.evaluateBatch(delta, sourceState, batch);
+			results.push(...batchResults);
 		}
-
-		this._evaluationCount += candidates.length;
-		this._shareCount += shareCount;
 
 		return results;
 	}
@@ -354,30 +370,43 @@ export class InformationBroker {
 	}
 
 	/**
-	 * Evaluates a single candidate target agent for information sharing.
+	 * Evaluates a batch of candidate target agents for information sharing
+	 * in a single LLM call.
 	 *
 	 * Sends a one-shot prompt to the context-analyzer conversation
-	 * with full context about the source delta, source state, target
-	 * state, and any dependency relationship.
+	 * with full context about the source delta, source state, and all
+	 * target states in the batch, along with any dependency relationships.
 	 *
-	 * @param delta       - The source delta being evaluated.
-	 * @param sourceState - The source agent's full context state.
-	 * @param targetState - The candidate target agent's context state.
-	 * @returns A complete {@link SharingDecision}, or `null` if evaluation failed.
+	 * @param delta        - The source delta being evaluated.
+	 * @param sourceState  - The source agent's full context state.
+	 * @param targetStates - The candidate target agents' context states.
+	 * @returns An array of {@link SharingDecision} for each target in the batch.
 	 */
-	private async evaluateCandidate(
+	private async evaluateBatch(
 		delta: ContextDelta,
 		sourceState: AgentContextState,
-		targetState: AgentContextState,
-	): Promise<SharingDecision | null> {
-		// Find the dependency between source and target (if any)
-		const dependency = this.findDependency(
-			sourceState.agentId,
-			targetState.agentId,
-		);
+		targetStates: AgentContextState[],
+	): Promise<SharingDecision[]> {
+		// Build the targets array for the Handlebars template
+		const targets = targetStates.map((targetState) => {
+			const dependency = this.findDependency(
+				sourceState.agentId,
+				targetState.agentId,
+			);
 
-		// Build the sharing decision prompt from the Handlebars template
-		const prompt = sharingDecisionPrompt({
+			return {
+				agentId: targetState.agentId,
+				agentName: targetState.agentName,
+				taskDescription: targetState.taskDescription,
+				taskRole: targetState.taskRole,
+				status: targetState.status,
+				completed: targetState.completed,
+				dependency: dependency ?? null,
+			};
+		});
+
+		// Build the batched sharing decision prompt from the Handlebars template
+		const prompt = batchedSharingDecisionPrompt({
 			sourceAgent: {
 				agentId: sourceState.agentId,
 				agentName: sourceState.agentName,
@@ -390,83 +419,88 @@ export class InformationBroker {
 				summary: delta.summary,
 				data: delta.data,
 			},
-			targetAgent: {
-				agentId: targetState.agentId,
-				agentName: targetState.agentName,
-				taskDescription: targetState.taskDescription,
-				taskRole: targetState.taskRole,
-				status: targetState.status,
-				completed: targetState.completed,
-			},
-			dependency: dependency ?? null,
+			targets,
 		});
 
 		this.logger.debug(
 			{
 				sourceAgentId: sourceState.agentId,
-				targetAgentId: targetState.agentId,
+				targetCount: targetStates.length,
 				deltaType: delta.type,
-				hasDependency: !!dependency,
 			},
-			`Evaluating sharing: ${sourceState.agentName} → ${targetState.agentName}`,
+			`Evaluating sharing batch: ${sourceState.agentName} → ${targetStates.length} target(s)`,
 		);
 
 		try {
 			// Use one-shot to avoid polluting the conversation history
-			const partialDecision = await this.conversations.sendOneShotJson(
+			const batchDecisions = await this.conversations.sendOneShotJson(
 				ConversationRole.CONTEXT_ANALYZER,
 				prompt,
-				validateSharingDecision,
+				validateBatchedSharingDecision,
+				{ maxTokens: 300 * targetStates.length, maxJsonAttempts: 2 },
 			);
 
-			if (!partialDecision) {
-				this.logger.warn(
+			// Map the results into SharingDecision[] with sourceAgentId
+			const results: SharingDecision[] = batchDecisions.map((decision) => ({
+				shouldShare: decision.shouldShare,
+				reasoning: decision.reasoning,
+				information: decision.information,
+				sourceAgentId: sourceState.agentId,
+				targetAgentId: decision.targetAgentId,
+			}));
+
+			// Log summary
+			const shareCount = results.filter((d) => d.shouldShare).length;
+			if (results.length > 0) {
+				this.logger.info(
 					{
 						sourceAgentId: sourceState.agentId,
-						targetAgentId: targetState.agentId,
+						deltaType: delta.type,
+						candidatesEvaluated: targetStates.length,
+						sharingApproved: shareCount,
 					},
-					"Sharing decision validation returned null",
+					`Sharing evaluation: ${shareCount}/${targetStates.length} candidates approved`,
 				);
-				return null;
 			}
 
-			const decision: SharingDecision = {
-				...partialDecision,
-				sourceAgentId: sourceState.agentId,
-				targetAgentId: targetState.agentId,
-			};
+			for (const decision of results) {
+				this.logger.debug(
+					{
+						shouldShare: decision.shouldShare,
+						sourceAgentId: decision.sourceAgentId,
+						targetAgentId: decision.targetAgentId,
+						reasoning: decision.reasoning.slice(0, 100),
+					},
+					decision.shouldShare
+						? `Sharing approved: ${sourceState.agentName} → ${decision.targetAgentId}`
+						: `Sharing denied: ${sourceState.agentName} → ${decision.targetAgentId}`,
+				);
+			}
 
-			this.logger.debug(
-				{
-					shouldShare: decision.shouldShare,
-					sourceAgentId: decision.sourceAgentId,
-					targetAgentId: decision.targetAgentId,
-					reasoning: decision.reasoning.slice(0, 100),
-				},
-				decision.shouldShare
-					? `Sharing approved: ${sourceState.agentName} → ${targetState.agentName}`
-					: `Sharing denied: ${sourceState.agentName} → ${targetState.agentName}`,
-			);
+			this._evaluationCount += targetStates.length;
+			this._shareCount += shareCount;
 
-			return decision;
+			return results;
 		} catch (error) {
 			this.logger.warn(
 				{
 					sourceAgentId: sourceState.agentId,
-					targetAgentId: targetState.agentId,
+					targetCount: targetStates.length,
 					error: toErrorMessage(error),
 				},
-				"Sharing evaluation LLM call failed",
+				"Batched sharing evaluation LLM call failed",
 			);
 
-			// On failure, default to not sharing (safe default)
-			return {
+			// On failure, default to not sharing for all targets (safe default)
+			this._evaluationCount += targetStates.length;
+
+			return targetStates.map((targetState) => ({
 				shouldShare: false,
 				reasoning: `Evaluation failed: ${toErrorMessage(error)}`,
 				sourceAgentId: sourceState.agentId,
 				targetAgentId: targetState.agentId,
 				information: "",
-			};
+			}));
 		}
 	}
 

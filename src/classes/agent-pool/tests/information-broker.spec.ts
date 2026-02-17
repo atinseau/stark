@@ -13,11 +13,14 @@ describe("InformationBroker", () => {
 	it("skips deltas below significance threshold", async () => {
 		const mockConversations = {
 			sendOneShotJson: mock(() =>
-				Promise.resolve({
-					shouldShare: true,
-					reasoning: "test",
-					information: "info",
-				}),
+				Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: true,
+						reasoning: "test",
+						information: "info",
+					},
+				]),
 			),
 		} as any;
 		const tracker = new ContextTracker();
@@ -47,11 +50,14 @@ describe("InformationBroker", () => {
 	it("returns empty when no other agents exist", async () => {
 		const mockConversations = {
 			sendOneShotJson: mock(() =>
-				Promise.resolve({
-					shouldShare: true,
-					reasoning: "test",
-					information: "info",
-				}),
+				Promise.resolve([
+					{
+						targetAgentId: "agent-1",
+						shouldShare: true,
+						reasoning: "test",
+						information: "info",
+					},
+				]),
 			),
 		} as any;
 		const tracker = new ContextTracker();
@@ -89,12 +95,15 @@ describe("InformationBroker", () => {
 	it("evaluates candidates and returns sharing decisions", async () => {
 		const mockConversations = {
 			sendOneShotJson: mock(() =>
-				Promise.resolve({
-					shouldShare: true,
-					reasoning: "The API structure is needed for test writing",
-					information:
-						"The API has endpoints: GET /users, POST /users, DELETE /users/:id",
-				}),
+				Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: true,
+						reasoning: "The API structure is needed for test writing",
+						information:
+							"The API has endpoints: GET /users, POST /users, DELETE /users/:id",
+					},
+				]),
 			),
 		} as any;
 
@@ -147,11 +156,14 @@ describe("InformationBroker", () => {
 	it("excludes completed agents from candidates", async () => {
 		const mockConversations = {
 			sendOneShotJson: mock(() =>
-				Promise.resolve({
-					shouldShare: true,
-					reasoning: "test",
-					information: "info",
-				}),
+				Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: true,
+						reasoning: "test",
+						information: "info",
+					},
+				]),
 			),
 		} as any;
 
@@ -240,7 +252,7 @@ describe("InformationBroker", () => {
 		};
 
 		const decisions = await broker.evaluate(delta);
-		// Should get a decision back (not throw) with shouldShare: false
+		// Should get a decision back (not throw) with shouldShare: false for each target
 		expect(decisions).toHaveLength(1);
 		expect(decisions[0]!.shouldShare).toBe(false);
 		expect(decisions[0]!.reasoning).toContain("failed");
@@ -255,11 +267,14 @@ describe("Information sharing conditional behavior", () => {
 	it("sharing does not happen when only one agent exists", async () => {
 		const mockConversations = {
 			sendOneShotJson: mock(() =>
-				Promise.resolve({
-					shouldShare: true,
-					reasoning: "test",
-					information: "info",
-				}),
+				Promise.resolve([
+					{
+						targetAgentId: "a1",
+						shouldShare: true,
+						reasoning: "test",
+						information: "info",
+					},
+				]),
 			),
 		} as any;
 
@@ -301,11 +316,14 @@ describe("Information sharing conditional behavior", () => {
 				// LLM decides NOT to share even though agents exist
 				const shouldShare = false;
 				llmDecisions.push(shouldShare);
-				return Promise.resolve({
-					shouldShare,
-					reasoning: "The information is not relevant to the target's task",
-					information: "",
-				});
+				return Promise.resolve([
+					{
+						targetAgentId: "a2",
+						shouldShare,
+						reasoning: "The information is not relevant to the target's task",
+						information: "",
+					},
+				]);
 			}),
 		} as any;
 

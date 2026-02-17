@@ -2,10 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { PoolEvent } from "../../../enums/pool-event.enum.ts";
 import { AgentPool } from "../agent-pool.ts";
 import {
-  HAS_API_KEY,
-  INT_TIMEOUT_MS,
-  intPoolConfig,
-  trackingAgentFactory,
+	HAS_API_KEY,
+	INT_TIMEOUT_MS,
+	intPoolConfig,
+	trackingAgentFactory,
 } from "./test-helpers-int.ts";
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -15,226 +15,230 @@ import {
 // ════════════════════════════════════════════════════════════════════════════
 
 describe.skipIf(!HAS_API_KEY)(
-  "AgentPool int — multi-agent & sequential",
-  () => {
+	"AgentPool int — multi-agent & sequential",
+	() => {
+		// ── Multi-Agent Execution ───────────────────────────────────────────
 
+		describe("multi-agent execution", () => {
+			it.concurrent(
+				"spawns multiple agents for a complex task with separable concerns",
+				async () => {
+					const tracker = trackingAgentFactory();
 
-    // ── Multi-Agent Execution ───────────────────────────────────────────
+					const pool = new AgentPool(
+						intPoolConfig({
+							createAgent: tracker.factory,
+							maxAgents: 5,
+						}),
+					);
 
-    describe("multi-agent execution", () => {
-      it.concurrent(
-        "spawns multiple agents for a complex task with separable concerns",
-        async () => {
-          const tracker = trackingAgentFactory();
+					try {
+						const result = await pool.execute(
+							"Build a complete REST API with Express.js including: " +
+								"1) The API routes and controllers for a user management system (CRUD), " +
+								"2) A comprehensive test suite with unit and integration tests using Jest, " +
+								"3) API documentation using Swagger/OpenAPI specification",
+						);
 
-          const pool = new AgentPool(
-            intPoolConfig({
-              createAgent: tracker.factory,
-              maxAgents: 5,
-            }),
-          );
+						expect(result).toBeDefined();
+						expect(result.analysis).toBeDefined();
+						expect(result.analysis.subtasks.length).toBeGreaterThanOrEqual(1);
 
-          try {
-            const result = await pool.execute(
-              "Build a complete REST API with Express.js including: " +
-              "1) The API routes and controllers for a user management system (CRUD), " +
-              "2) A comprehensive test suite with unit and integration tests using Jest, " +
-              "3) API documentation using Swagger/OpenAPI specification",
-            );
+						// Whether the LLM chooses single or multi, agents must have completed
+						expect(result.agents.length).toBeGreaterThanOrEqual(1);
+						for (const agentResult of result.agents) {
+							expect(agentResult.success).toBe(true);
+							expect(agentResult.subtask).toBeDefined();
+							expect(agentResult.subtask.role.length).toBeGreaterThan(0);
+							expect(agentResult.subtask.prompt.length).toBeGreaterThan(0);
+						}
 
-            expect(result).toBeDefined();
-            expect(result.analysis).toBeDefined();
-            expect(result.analysis.subtasks.length).toBeGreaterThanOrEqual(1);
+						// All spawned agents received prompts
+						expect(tracker.promptCalls.length).toBe(result.agents.length);
 
-            // Whether the LLM chooses single or multi, agents must have completed
-            expect(result.agents.length).toBeGreaterThanOrEqual(1);
-            for (const agentResult of result.agents) {
-              expect(agentResult.success).toBe(true);
-              expect(agentResult.subtask).toBeDefined();
-              expect(agentResult.subtask.role.length).toBeGreaterThan(0);
-              expect(agentResult.subtask.prompt.length).toBeGreaterThan(0);
-            }
+						// Summary covers the execution
+						expect(result.summary.length).toBeGreaterThan(0);
+					} finally {
+						if (!(pool as any)._destroyed) await pool.destroy();
+					}
+				},
+				INT_TIMEOUT_MS,
+			);
 
-            // All spawned agents received prompts
-            expect(tracker.promptCalls.length).toBe(result.agents.length);
+			it.concurrent(
+				"respects maxAgents limit even when planner suggests more subtasks",
+				async () => {
+					const tracker = trackingAgentFactory();
 
-            // Summary covers the execution
-            expect(result.summary.length).toBeGreaterThan(0);
-          } finally {
-            if (!(pool as any)._destroyed) await pool.destroy();
-          }
-        },
-        INT_TIMEOUT_MS,
-      );
+					const pool = new AgentPool(
+						intPoolConfig({
+							createAgent: tracker.factory,
+							maxAgents: 2,
+						}),
+					);
 
-      it.concurrent(
-        "respects maxAgents limit even when planner suggests more subtasks",
-        async () => {
-          const tracker = trackingAgentFactory();
+					try {
+						const result = await pool.execute(
+							"Build a full-stack application with: " +
+								"1) A React frontend with routing and state management, " +
+								"2) A Node.js backend API with authentication, " +
+								"3) A PostgreSQL database schema with migrations, " +
+								"4) Deployment configuration with Docker and CI/CD pipeline",
+						);
 
-          const pool = new AgentPool(
-            intPoolConfig({
-              createAgent: tracker.factory,
-              maxAgents: 2,
-            }),
-          );
+						// Regardless of how many subtasks the planner identified,
+						// no more than 2 agents should have been spawned
+						expect(tracker.agents.length).toBeLessThanOrEqual(2);
+						expect(result.agents.length).toBeLessThanOrEqual(2);
+					} finally {
+						if (!(pool as any)._destroyed) await pool.destroy();
+					}
+				},
+				INT_TIMEOUT_MS,
+			);
+		});
 
-          try {
-            const result = await pool.execute(
-              "Build a full-stack application with: " +
-              "1) A React frontend with routing and state management, " +
-              "2) A Node.js backend API with authentication, " +
-              "3) A PostgreSQL database schema with migrations, " +
-              "4) Deployment configuration with Docker and CI/CD pipeline",
-            );
+		// ── Sequential Task Execution ───────────────────────────────────────
 
-            // Regardless of how many subtasks the planner identified,
-            // no more than 2 agents should have been spawned
-            expect(tracker.agents.length).toBeLessThanOrEqual(2);
-            expect(result.agents.length).toBeLessThanOrEqual(2);
-          } finally {
-            if (!(pool as any)._destroyed) await pool.destroy();
-          }
-        },
-        INT_TIMEOUT_MS,
-      );
-    });
+		describe("sequential task execution", () => {
+			it.concurrent(
+				"can execute multiple tasks in sequence, cleaning up between them",
+				async () => {
+					const tracker = trackingAgentFactory();
+					const pool = new AgentPool(
+						intPoolConfig({ createAgent: tracker.factory }),
+					);
 
-    // ── Sequential Task Execution ───────────────────────────────────────
+					try {
+						// First task
+						const result1 = await pool.execute("Create a README.md file");
+						expect(result1.agents.length).toBeGreaterThanOrEqual(1);
+						expect(result1.agents.every((a) => a.success)).toBe(true);
 
-    describe("sequential task execution", () => {
-      it.concurrent(
-        "can execute multiple tasks in sequence, cleaning up between them",
-        async () => {
-          const tracker = trackingAgentFactory();
-          const pool = new AgentPool(intPoolConfig({ createAgent: tracker.factory }));
+						// Pool should be idle and cleaned up after first task
+						const midState = pool.getState();
+						expect(midState.executing).toBe(false);
+						expect(midState.currentTask).toBeNull();
+						expect(midState.activeAgentCount).toBe(0);
 
-          try {
-            // First task
-            const result1 = await pool.execute("Create a README.md file");
-            expect(result1.agents.length).toBeGreaterThanOrEqual(1);
-            expect(result1.agents.every((a) => a.success)).toBe(true);
+						// Second task on the same pool instance
+						const result2 = await pool.execute("Add a LICENSE file");
+						expect(result2.agents.length).toBeGreaterThanOrEqual(1);
+						expect(result2.agents.every((a) => a.success)).toBe(true);
 
-            // Pool should be idle and cleaned up after first task
-            const midState = pool.getState();
-            expect(midState.executing).toBe(false);
-            expect(midState.currentTask).toBeNull();
-            expect(midState.activeAgentCount).toBe(0);
+						// Both tasks should have spawned agents
+						// (agents from first task are destroyed, new ones spawned for second)
+						expect(tracker.promptCalls.length).toBeGreaterThanOrEqual(2);
+					} finally {
+						if (!(pool as any)._destroyed) await pool.destroy();
+					}
+				},
+				INT_TIMEOUT_MS * 2,
+			);
 
-            // Second task on the same pool instance
-            const result2 = await pool.execute("Add a LICENSE file");
-            expect(result2.agents.length).toBeGreaterThanOrEqual(1);
-            expect(result2.agents.every((a) => a.success)).toBe(true);
+			it.concurrent(
+				"rejects concurrent execute() calls",
+				async () => {
+					const tracker = trackingAgentFactory({ promptDelay: 500 });
+					const pool = new AgentPool(
+						intPoolConfig({ createAgent: tracker.factory }),
+					);
 
-            // Both tasks should have spawned agents
-            // (agents from first task are destroyed, new ones spawned for second)
-            expect(tracker.promptCalls.length).toBeGreaterThanOrEqual(2);
-          } finally {
-            if (!(pool as any)._destroyed) await pool.destroy();
-          }
-        },
-        INT_TIMEOUT_MS * 2,
-      );
+					try {
+						// Register the listener BEFORE calling execute, because
+						// PLANNING_START is emitted synchronously inside execute()
+						// before the first async LLM call. If we register after,
+						// the event has already fired and the promise hangs forever.
+						const planningStarted = new Promise<void>((resolve) => {
+							pool.once(PoolEvent.PLANNING_START, () => resolve());
+						});
 
-      it.concurrent(
-        "rejects concurrent execute() calls",
-        async () => {
-          const tracker = trackingAgentFactory({ promptDelay: 500 });
-          const pool = new AgentPool(intPoolConfig({ createAgent: tracker.factory }));
+						// Start first task (don't await)
+						const first = pool.execute("First task");
 
-          try {
-            // Register the listener BEFORE calling execute, because
-            // PLANNING_START is emitted synchronously inside execute()
-            // before the first async LLM call. If we register after,
-            // the event has already fired and the promise hangs forever.
-            const planningStarted = new Promise<void>((resolve) => {
-              pool.once(PoolEvent.PLANNING_START, () => resolve());
-            });
+						// Wait for planning to start so we're truly mid-execution
+						await planningStarted;
 
-            // Start first task (don't await)
-            const first = pool.execute("First task");
+						// Second call should throw
+						await expect(pool.execute("Second task")).rejects.toThrow(
+							/already executing/,
+						);
 
-            // Wait for planning to start so we're truly mid-execution
-            await planningStarted;
+						// Wait for first task to complete
+						await first;
+					} finally {
+						if (!(pool as any)._destroyed) await pool.destroy();
+					}
+				},
+				INT_TIMEOUT_MS,
+			);
+		});
 
-            // Second call should throw
-            await expect(pool.execute("Second task")).rejects.toThrow(
-              /already executing/,
-            );
+		// ── Context Injection ───────────────────────────────────────────────
 
-            // Wait for first task to complete
-            await first;
-          } finally {
-            if (!(pool as any)._destroyed) await pool.destroy();
-          }
-        },
-        INT_TIMEOUT_MS,
-      );
-    });
+		describe("context injection", () => {
+			it.concurrent(
+				"can interact with the pool and query state during execution",
+				async () => {
+					const contextInjections: string[] = [];
 
-    // ── Context Injection ───────────────────────────────────────────────
+					// Create agents that track context injections with a delay
+					// so we have time to inspect mid-execution state
+					const tracker = trackingAgentFactory({ promptDelay: 300 });
+					const originalFactory = tracker.factory;
+					const wrappedFactory = (config?: { name?: string }) => {
+						const agent = originalFactory(config);
+						const originalInjectContext = agent.injectContext;
+						(agent as any).injectContext = (instructions: string) => {
+							contextInjections.push(instructions);
+							return originalInjectContext.call(agent, instructions);
+						};
+						return agent;
+					};
 
-    describe("context injection", () => {
-      it.concurrent(
-        "can interact with the pool and query state during execution",
-        async () => {
-          const contextInjections: string[] = [];
+					const pool = new AgentPool(
+						intPoolConfig({ createAgent: wrappedFactory }),
+					);
 
-          // Create agents that track context injections with a delay
-          // so we have time to inspect mid-execution state
-          const tracker = trackingAgentFactory({ promptDelay: 300 });
-          const originalFactory = tracker.factory;
-          const wrappedFactory = (config?: { name?: string }) => {
-            const agent = originalFactory(config);
-            const originalInjectContext = agent.injectContext;
-            (agent as any).injectContext = (instructions: string) => {
-              contextInjections.push(instructions);
-              return originalInjectContext.call(agent, instructions);
-            };
-            return agent;
-          };
+					try {
+						// Start a task
+						const executePromise = pool.execute(
+							"Write a simple calculator module in TypeScript",
+						);
 
-          const pool = new AgentPool(intPoolConfig({ createAgent: wrappedFactory }));
+						// Wait for agents to be spawned
+						await new Promise<void>((resolve) => {
+							pool.once(PoolEvent.AGENT_SPAWNED, () => {
+								// Small delay to ensure agent is in managed agents map
+								setTimeout(resolve, 50);
+							});
+						});
 
-          try {
-            // Start a task
-            const executePromise = pool.execute(
-              "Write a simple calculator module in TypeScript",
-            );
+						// Query state mid-execution — this is the core assertion:
+						// the pool must remain responsive while agents are running
+						const midState = pool.getState();
+						expect(midState.executing).toBe(true);
+						expect(midState.activeAgentCount).toBeGreaterThanOrEqual(1);
+						expect(midState.currentTask).toContain("calculator");
+						expect(midState.agents.length).toBeGreaterThanOrEqual(1);
 
-            // Wait for agents to be spawned
-            await new Promise<void>((resolve) => {
-              pool.once(PoolEvent.AGENT_SPAWNED, () => {
-                // Small delay to ensure agent is in managed agents map
-                setTimeout(resolve, 50);
-              });
-            });
+						// Verify each agent has a role assigned by the planner
+						for (const agent of midState.agents) {
+							expect(agent.agentId).toBeDefined();
+							expect(agent.agentName.length).toBeGreaterThan(0);
+							expect(agent.taskRole.length).toBeGreaterThan(0);
+						}
 
-            // Query state mid-execution — this is the core assertion:
-            // the pool must remain responsive while agents are running
-            const midState = pool.getState();
-            expect(midState.executing).toBe(true);
-            expect(midState.activeAgentCount).toBeGreaterThanOrEqual(1);
-            expect(midState.currentTask).toContain("calculator");
-            expect(midState.agents.length).toBeGreaterThanOrEqual(1);
-
-            // Verify each agent has a role assigned by the planner
-            for (const agent of midState.agents) {
-              expect(agent.agentId).toBeDefined();
-              expect(agent.agentName.length).toBeGreaterThan(0);
-              expect(agent.taskRole.length).toBeGreaterThan(0);
-            }
-
-            // Wait for execution to complete
-            const result = await executePromise;
-            expect(result.agents.length).toBeGreaterThanOrEqual(1);
-            expect(result.agents.every((a) => a.success)).toBe(true);
-          } finally {
-            if (!(pool as any)._destroyed) await pool.destroy();
-          }
-        },
-        INT_TIMEOUT_MS,
-      );
-    });
-  },
+						// Wait for execution to complete
+						const result = await executePromise;
+						expect(result.agents.length).toBeGreaterThanOrEqual(1);
+						expect(result.agents.every((a) => a.success)).toBe(true);
+					} finally {
+						if (!(pool as any)._destroyed) await pool.destroy();
+					}
+				},
+				INT_TIMEOUT_MS,
+			);
+		});
+	},
 );

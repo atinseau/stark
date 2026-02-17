@@ -7,6 +7,7 @@ import type {
 	OpenRouterConfig,
 	OpenRouterMessage,
 } from "../../types/agent-pool.types.ts";
+
 import { OpenRouterClient } from "./openrouter-client.ts";
 
 // ── ConversationManager ────────────────────────────────────────────────────
@@ -69,13 +70,15 @@ export class ConversationManager {
 	 *
 	 * @param role         - The purpose of this conversation.
 	 * @param systemPrompt - The system-level instructions for the LLM.
+	 * @param model        - Optional model override for all LLM calls in this conversation.
 	 */
-	register(role: ConversationRole, systemPrompt: string): void {
+	register(role: ConversationRole, systemPrompt: string, model?: string): void {
 		this.conversations.set(role, {
 			role,
 			systemPrompt,
 			messages: [{ role: "system", content: systemPrompt }],
 			tokenCount: 0,
+			model,
 		});
 
 		this.logger.debug(
@@ -126,8 +129,15 @@ export class ConversationManager {
 			`Sending message to ${role} conversation`,
 		);
 
+		const effectiveOptions: ChatOptions | undefined = conversation.model
+			? { model: conversation.model, ...options }
+			: options;
+
 		try {
-			const response = await this.client.chat(conversation.messages, options);
+			const response = await this.client.chat(
+				conversation.messages,
+				effectiveOptions,
+			);
 
 			// Append the assistant's response to history
 			const assistantMessage: OpenRouterMessage = {
@@ -207,10 +217,14 @@ export class ConversationManager {
 			`Sending JSON request to ${role} conversation`,
 		);
 
+		const effectiveOptions: ChatOptions | undefined = conversation.model
+			? { model: conversation.model, ...options }
+			: options;
+
 		const result = await this.client.chatJson(
 			messagesForRequest,
 			validator,
-			options,
+			effectiveOptions,
 		);
 
 		// Persist only the successful exchange in the conversation history
@@ -254,7 +268,11 @@ export class ConversationManager {
 			{ role: "user", content },
 		];
 
-		return this.client.chat(messages, options);
+		const effectiveOptions: ChatOptions | undefined = conversation.model
+			? { model: conversation.model, ...options }
+			: options;
+
+		return this.client.chat(messages, effectiveOptions);
 	}
 
 	/**
@@ -279,7 +297,11 @@ export class ConversationManager {
 			{ role: "user", content },
 		];
 
-		return this.client.chatJson(messages, validator, options);
+		const effectiveOptions: ChatOptions | undefined = conversation.model
+			? { model: conversation.model, ...options }
+			: options;
+
+		return this.client.chatJson(messages, validator, effectiveOptions);
 	}
 
 	// ── Introspection ──────────────────────────────────────────────────

@@ -340,21 +340,29 @@ export class AgentPool extends EventEmitter {
 		);
 
 		// Register all conversation roles with their system prompts
+		const modelOverrides = this.config.modelOverrides ?? {};
 		this.conversations.register(
 			ConversationRole.CONTEXT_ANALYZER,
 			contextAnalysisSystemPrompt({}),
+			modelOverrides[ConversationRole.CONTEXT_ANALYZER],
 		);
 		this.conversations.register(
 			ConversationRole.USER_INTERACTION,
 			summarySystemPrompt({}),
+			modelOverrides[ConversationRole.USER_INTERACTION],
 		);
 		this.conversations.register(
 			ConversationRole.INTENT_ANALYZER,
 			intentAnalysisSystemPrompt({}),
+			modelOverrides[ConversationRole.INTENT_ANALYZER],
 		);
 
 		// Sub-systems
-		this.planner = new TaskPlanner(this.conversations, this.logger);
+		this.planner = new TaskPlanner(
+			this.conversations,
+			this.logger,
+			modelOverrides[ConversationRole.PLANNER],
+		);
 		this.contextTracker = new ContextTracker();
 		this.notificationEngine = new NotificationEngine(
 			this.conversations,
@@ -1625,6 +1633,7 @@ export class AgentPool extends EventEmitter {
 				ConversationRole.INTENT_ANALYZER,
 				prompt,
 				validateIntentAnalysis,
+				{ maxTokens: 300 },
 			);
 
 			return analysis;
