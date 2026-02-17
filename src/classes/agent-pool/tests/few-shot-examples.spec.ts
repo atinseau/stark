@@ -752,14 +752,20 @@ describe("Intent analysis example JSONs pass structural validation", () => {
 		it(`example ${i + 1} passes IntentAnalysis validation`, () => {
 			const obj = JSON.parse(blocks[i]!);
 
-			expect(typeof obj.intent).toBe("string");
-			expect(validIntents).toContain(obj.intent);
-			expect(typeof obj.confidence).toBe("number");
-			expect(obj.confidence).toBeGreaterThanOrEqual(0);
-			expect(obj.confidence).toBeLessThanOrEqual(1);
+			// New multi-intent format: { intents: [...], reasoning: "..." }
+			expect(Array.isArray(obj.intents)).toBe(true);
+			expect(obj.intents.length).toBeGreaterThanOrEqual(1);
 			expect(typeof obj.reasoning).toBe("string");
-			expect(typeof obj.parameters).toBe("object");
-			expect(obj.parameters).not.toBeNull();
+
+			for (const intent of obj.intents) {
+				expect(typeof intent.intent).toBe("string");
+				expect(validIntents).toContain(intent.intent);
+				expect(typeof intent.confidence).toBe("number");
+				expect(intent.confidence).toBeGreaterThanOrEqual(0);
+				expect(intent.confidence).toBeLessThanOrEqual(1);
+				expect(typeof intent.parameters).toBe("object");
+				expect(intent.parameters).not.toBeNull();
+			}
 		});
 	}
 });

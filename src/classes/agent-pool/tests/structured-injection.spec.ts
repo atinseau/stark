@@ -462,9 +462,14 @@ describe("AgentPool send — CONTEXT_INJECTION uses structured injection", () =>
 
 		// Mock the intent analyzer to return CONTEXT_INJECTION
 		(pool as any).analyzeIntent = mock(async () => ({
-			intent: "context_injection",
-			confidence: 0.95,
-			parameters: { instructions: "Use port 3000" },
+			intents: [
+				{
+					intent: "context_injection",
+					confidence: 0.95,
+					parameters: { instructions: "Use port 3000" },
+				},
+			],
+			primaryIntent: "context_injection",
 			reasoning: "User wants to inject context",
 		}));
 

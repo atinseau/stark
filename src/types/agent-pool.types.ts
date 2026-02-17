@@ -737,19 +737,45 @@ export interface CoordinationStats {
 // ── Intent Analysis Types ──────────────────────────────────────────────────
 
 /**
- * Result of the intent analyzer's classification of a user message.
+ * A single detected intent within a multi-intent analysis.
  */
-export interface IntentAnalysis {
+export interface DetectedIntent {
 	/** The classified intent type. */
 	readonly intent: UserIntent;
 
-	/** Confidence score (0.0 to 1.0). */
+	/** Confidence score for this specific intent (0.0 to 1.0). */
 	readonly confidence: number;
 
-	/** Extracted parameters relevant to the intent. */
+	/** Extracted parameters relevant to this intent. */
 	readonly parameters: Record<string, unknown>;
+}
 
-	/** Human-readable reasoning. */
+/**
+ * Result of the intent analyzer's classification of a user message.
+ *
+ * Supports multi-intent messages where the user expresses more than
+ * one intention in a single message (e.g., "Start the tests and
+ * notify me when done" → new_task + notification_preference).
+ *
+ * The `intents` array is ordered by priority: the primary intent first,
+ * secondary intents after. When only one intent is detected, the array
+ * contains a single element.
+ */
+export interface IntentAnalysis {
+	/**
+	 * The detected intents, ordered by priority (primary first).
+	 * Guaranteed to have at least one entry.
+	 */
+	readonly intents: DetectedIntent[];
+
+	/**
+	 * Convenience accessor: the primary (first) intent.
+	 * Equivalent to `intents[0].intent`.
+	 * Kept for backward compatibility with code that reads `analysis.primaryIntent`.
+	 */
+	readonly primaryIntent: UserIntent;
+
+	/** Human-readable reasoning for the overall classification. */
 	readonly reasoning: string;
 }
 

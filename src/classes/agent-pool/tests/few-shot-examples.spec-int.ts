@@ -12,6 +12,7 @@ import {
 	sharingAnalysisSystemPrompt,
 } from "../../../prompts/index.ts";
 import type {
+	DetectedIntent,
 	IntentAnalysis,
 	TaskAnalysis,
 } from "../../../types/agent-pool.types.ts";
@@ -62,21 +63,40 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
 		"context_injection",
 		"cancel",
 		"approve_agent",
+		"replan",
 		"unknown",
 	];
-	if (typeof obj.intent !== "string" || !validIntents.includes(obj.intent))
-		return null;
-	if (typeof obj.confidence !== "number") return null;
+
 	if (typeof obj.reasoning !== "string") return null;
+	if (!Array.isArray(obj.intents) || obj.intents.length === 0) return null;
+
+	const intents: DetectedIntent[] = [];
+
+	for (const raw of obj.intents) {
+		if (raw == null || typeof raw !== "object") return null;
+		const item = raw as Record<string, unknown>;
+
+		if (typeof item.intent !== "string" || !validIntents.includes(item.intent))
+			return null;
+		if (typeof item.confidence !== "number") return null;
+
+		intents.push({
+			intent: item.intent as UserIntent,
+			confidence: Math.max(0, Math.min(1, item.confidence)),
+			parameters:
+				item.parameters != null && typeof item.parameters === "object"
+					? (item.parameters as Record<string, unknown>)
+					: {},
+		});
+	}
+
+	const first = intents[0];
+	if (!first) return null;
 
 	return {
-		intent: obj.intent as IntentAnalysis["intent"],
-		confidence: Math.max(0, Math.min(1, obj.confidence)),
-		parameters:
-			obj.parameters != null && typeof obj.parameters === "object"
-				? (obj.parameters as Record<string, unknown>)
-				: {},
-		reasoning: obj.reasoning,
+		intents,
+		primaryIntent: first.intent,
+		reasoning: obj.reasoning as string,
 	};
 }
 
@@ -573,10 +593,11 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.NEW_TASK);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.8);
-				expect(analysis.parameters).toBeDefined();
-				expect(typeof analysis.parameters.task).toBe("string");
+				expect(analysis.primaryIntent).toBe(UserIntent.NEW_TASK);
+				expect(analysis.intents.length).toBeGreaterThanOrEqual(1);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.8);
+				expect(analysis.intents[0]!.parameters).toBeDefined();
+				expect(typeof analysis.intents[0]!.parameters.task).toBe("string");
 			},
 			INT_TIMEOUT_MS,
 		);
@@ -608,8 +629,8 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.STATUS_QUERY);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.7);
+				expect(analysis.primaryIntent).toBe(UserIntent.STATUS_QUERY);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.7);
 			},
 			INT_TIMEOUT_MS,
 		);
@@ -641,8 +662,8 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.NOTIFICATION_PREFERENCE);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.7);
+				expect(analysis.primaryIntent).toBe(UserIntent.NOTIFICATION_PREFERENCE);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.7);
 			},
 			INT_TIMEOUT_MS,
 		);
@@ -674,8 +695,8 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.CANCEL);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.8);
+				expect(analysis.primaryIntent).toBe(UserIntent.CANCEL);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.8);
 			},
 			INT_TIMEOUT_MS,
 		);
@@ -707,9 +728,11 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.CONTEXT_INJECTION);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.7);
-				expect(typeof analysis.parameters.instructions).toBe("string");
+				expect(analysis.primaryIntent).toBe(UserIntent.CONTEXT_INJECTION);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.7);
+				expect(typeof analysis.intents[0]!.parameters.instructions).toBe(
+					"string",
+				);
 			},
 			INT_TIMEOUT_MS,
 		);
@@ -747,9 +770,9 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 					{ maxTokens: 300 },
 				);
 
-				expect(analysis.intent).toBe(UserIntent.APPROVE_AGENT);
-				expect(analysis.confidence).toBeGreaterThanOrEqual(0.7);
-				expect(analysis.parameters.approved).toBe(true);
+				expect(analysis.primaryIntent).toBe(UserIntent.APPROVE_AGENT);
+				expect(analysis.intents[0]!.confidence).toBeGreaterThanOrEqual(0.7);
+				expect(analysis.intents[0]!.parameters.approved).toBe(true);
 			},
 			INT_TIMEOUT_MS,
 		);

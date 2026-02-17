@@ -37,6 +37,7 @@ import type {
 	ContextDelta,
 	ContextEvent,
 	CoordinationStats,
+	DetectedIntent,
 	IntentAnalysis,
 	NotificationPreference,
 	PoolEventMap,
@@ -98,19 +99,40 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
 		"replan",
 		"unknown",
 	];
-	if (typeof obj.intent !== "string" || !validIntents.includes(obj.intent))
-		return null;
-	if (typeof obj.confidence !== "number") return null;
+
+	// Validate reasoning
 	if (typeof obj.reasoning !== "string") return null;
 
+	// Validate intents array
+	if (!Array.isArray(obj.intents) || obj.intents.length === 0) return null;
+
+	const intents: DetectedIntent[] = [];
+
+	for (const raw of obj.intents) {
+		if (raw == null || typeof raw !== "object") return null;
+		const item = raw as Record<string, unknown>;
+
+		if (typeof item.intent !== "string" || !validIntents.includes(item.intent))
+			return null;
+		if (typeof item.confidence !== "number") return null;
+
+		intents.push({
+			intent: item.intent as UserIntent,
+			confidence: Math.max(0, Math.min(1, item.confidence)),
+			parameters:
+				item.parameters != null && typeof item.parameters === "object"
+					? (item.parameters as Record<string, unknown>)
+					: {},
+		});
+	}
+
+	const first = intents[0];
+	if (!first) return null;
+
 	return {
-		intent: obj.intent as IntentAnalysis["intent"],
-		confidence: Math.max(0, Math.min(1, obj.confidence)),
-		parameters:
-			obj.parameters != null && typeof obj.parameters === "object"
-				? (obj.parameters as Record<string, unknown>)
-				: {},
-		reasoning: obj.reasoning,
+		intents,
+		primaryIntent: first.intent,
+		reasoning: obj.reasoning as string,
 	};
 }
 
@@ -278,6 +300,32 @@ export class AgentPool extends EventEmitter {
 
 	/** Whether the pool has been destroyed. */
 	private _destroyed = false;
+
+	/**
+	 * Recent conversation history between the user and the pool.
+	 * Used by the intent analyzer to resolve references and maintain
+	 * conversational context across consecutive send() calls.
+	 *
+	 * Each entry is a { role: "user"|"pool", content: string } pair.
+	 * Limited to the last N exchanges to keep the prompt bounded.
+	 */
+	private readonly conversationHistory: Array<{
+		role: "user" | "pool";
+		content: string;
+		timestamp: string;
+	}> = [];
+
+	/**
+	 * Maximum number of conversation turns (user + pool messages combined)
+	 * to include in the intent analysis prompt.
+	 */
+	private static readonly MAX_CONVERSATION_HISTORY = 6;
+
+	/**
+	 * Minimum confidence threshold for an intent to be processed.
+	 * Intents below this threshold are filtered out.
+	 */
+	private static readonly MIN_INTENT_CONFIDENCE = 0.4;
 
 	/** Running count of subtask retries performed during current execution. */
 	private _retryCount = 0;
@@ -657,13 +705,19 @@ export class AgentPool extends EventEmitter {
 	 * Sends a message to the agent pool for processing.
 	 *
 	 * The message is analyzed by the intent analyzer to determine the
-	 * user's intent, then routed to the appropriate handler:
+	 * user's intent(s), then routed to the appropriate handler(s).
+	 *
+	 * Supports multi-intent messages: if the user expresses multiple
+	 * desires in a single message (e.g., "Start tests and notify me"),
+	 * all detected intents are processed in order.
 	 *
 	 * - **new_task**: Starts a new execution via `execute()`.
 	 * - **notification_preference**: Updates notification settings.
 	 * - **status_query**: Returns current pool state as a string.
 	 * - **context_injection**: Injects context into active agents.
 	 * - **cancel**: Cancels the current execution.
+	 * - **approve_agent**: Approves or denies a pending agent action.
+	 * - **replan**: Requests replanning of the current execution.
 	 * - **unknown**: Returns a help message.
 	 *
 	 * @param message - The user's message.
@@ -675,140 +729,103 @@ export class AgentPool extends EventEmitter {
 		// ── Model validation (cached — only hits OpenRouter API once) ────
 		await this.conversations.client.validateModel();
 
+		// Record user message in conversation history
+		this.recordConversation("user", message);
+
 		this.logger.info(
 			{ messageLength: message.length },
 			"Processing user message",
 		);
 
 		// Analyze intent
-		const intent = await this.analyzeIntent(message);
+		const analysis = await this.analyzeIntent(message);
 
 		this.logger.info(
 			{
-				intent: intent.intent,
-				confidence: intent.confidence,
+				primaryIntent: analysis.primaryIntent,
+				intentCount: analysis.intents.length,
+				intents: analysis.intents.map((i) => ({
+					intent: i.intent,
+					confidence: i.confidence,
+				})),
 			},
-			`Intent classified: ${intent.intent} (confidence: ${intent.confidence})`,
+			`Intent classified: ${analysis.intents.map((i) => i.intent).join(" + ")} ` +
+				`(primary: ${analysis.primaryIntent})`,
 		);
 
-		switch (intent.intent) {
-			case UserIntent.APPROVE_AGENT: {
-				return this.handleApprovalIntent(intent);
-			}
+		// Filter out low-confidence intents
+		const confidentIntents = analysis.intents.filter(
+			(i) => i.confidence >= AgentPool.MIN_INTENT_CONFIDENCE,
+		);
 
-			case UserIntent.NEW_TASK: {
-				const taskText =
-					typeof intent.parameters.task === "string"
-						? intent.parameters.task
-						: message;
-				return this.execute(taskText);
-			}
+		// If no confident intents remain, treat as unknown
+		if (confidentIntents.length === 0) {
+			const response =
+				"I'm not sure I understood your request. Could you rephrase? You can:\n" +
+				"- Send a task to execute\n" +
+				"- Ask about current status\n" +
+				"- Request notifications\n" +
+				"- Inject context into running agents\n" +
+				"- Cancel the current execution";
 
-			case UserIntent.NOTIFICATION_PREFERENCE: {
-				const enabled = intent.parameters.enabled !== false;
-				const minSignificance =
-					typeof intent.parameters.minSignificance === "number"
-						? intent.parameters.minSignificance
-						: 0.5;
-
-				this.notificationEngine.setPreference({
-					enabled,
-					minSignificance,
-				});
-
-				return enabled
-					? `Notifications enabled (minimum significance: ${minSignificance}).`
-					: "Notifications disabled.";
-			}
-
-			case UserIntent.STATUS_QUERY: {
-				const state = this.getState();
-				if (!state.executing) {
-					return "The pool is idle. No task is currently being executed.";
-				}
-
-				const lines: string[] = [
-					`**Current Task**: ${state.currentTask}`,
-					`**Strategy**: ${state.strategy}`,
-					`**Active Agents**: ${state.activeAgentCount}`,
-					"",
-					"**Agents**:",
-				];
-
-				for (const agent of state.agents) {
-					lines.push(
-						`- ${agent.agentName} (${agent.taskRole}): ${agent.completed ? "✅ completed" : `⚙️ ${agent.status}`}`,
-					);
-				}
-
-				return lines.join("\n");
-			}
-
-			case UserIntent.CONTEXT_INJECTION: {
-				const instructions =
-					typeof intent.parameters.instructions === "string"
-						? intent.parameters.instructions
-						: message;
-
-				if (this.managedAgents.size === 0) {
-					return "No active agents to inject context into.";
-				}
-
-				// Inject into all active agents as structured context
-				let injectedCount = 0;
-				for (const { agent } of this.managedAgents.values()) {
-					if (agent.status !== AgentStatus.DESTROYED) {
-						try {
-							const injection: StructuredContextInjection = {
-								content: instructions,
-								priority: ContextInjectionPriority.HIGH,
-								category: ContextInjectionCategory.USER_INSTRUCTION,
-								source: "user",
-								dependencyType: null,
-								timestamp: isoNow(),
-							};
-							agent.injectContext(injection);
-							injectedCount++;
-						} catch {
-							// Agent may have been destroyed between the check and the call
-						}
-					}
-				}
-
-				return `Context injected into ${injectedCount} active agent(s).`;
-			}
-
-			case UserIntent.CANCEL: {
-				if (!this._executing) {
-					return "No task is currently executing.";
-				}
-
-				await this.destroyManagedAgents();
-				return "Current execution cancelled. All agents destroyed.";
-			}
-
-			case UserIntent.REPLAN: {
-				if (!this._executing || !this._currentAnalysis) {
-					return "No active execution to replan.";
-				}
-
-				// Note: Full user-triggered replanning requires async coordination
-				// with the running execution loop. For this evolution, the intent
-				// is recognized but the actual trigger mechanism uses automatic
-				// triggers (failure, deadlock, cascading failures).
-				return "Replan evaluation requested. The system will evaluate whether the current plan should be modified.";
-			}
-
-			default:
-				return (
-					"I couldn't understand your request. You can:\n" +
-					"- Send a task to execute\n" +
-					"- Ask about current status\n" +
-					"- Request notifications (e.g., 'notify me of important changes')\n" +
-					"- Inject context into running agents\n" +
-					"- Cancel the current execution"
-				);
+			this.recordConversation("pool", response);
+			return response;
 		}
+
+		// Resolve conflicts between intents
+		const resolvedIntents = this.resolveIntentConflicts(confidentIntents);
+
+		// Process intents in order — the primary intent determines the return type.
+		// Secondary intents are processed for their side effects (notifications, context, etc.)
+		// but do NOT change the return value.
+		let primaryResponse: string | AgentPoolResult | null = null;
+		const sideEffectResponses: string[] = [];
+
+		for (const detected of resolvedIntents) {
+			const result = await this.handleSingleIntent(detected, message);
+
+			if (primaryResponse === null) {
+				// First intent processed = primary → its result is the return value
+				primaryResponse = result;
+			} else if (typeof result === "string") {
+				// Secondary intents' string responses are collected
+				sideEffectResponses.push(result);
+			} else {
+				// Secondary intent returned an AgentPoolResult — log warning, ignore
+				this.logger.warn(
+					{ intent: detected.intent },
+					"Secondary intent returned AgentPoolResult — ignoring (only primary intent's result is returned)",
+				);
+			}
+		}
+
+		// Build final response
+		let finalResponse: string | AgentPoolResult;
+
+		if (primaryResponse === null) {
+			// No intents processed (shouldn't happen due to validation, but guard)
+			finalResponse = "I couldn't understand your request.";
+		} else if (
+			typeof primaryResponse === "string" &&
+			sideEffectResponses.length > 0
+		) {
+			// Combine primary string response with side effect responses
+			finalResponse = [primaryResponse, ...sideEffectResponses].join("\n\n");
+		} else {
+			finalResponse = primaryResponse;
+		}
+
+		// Record pool response in conversation history
+		if (typeof finalResponse === "string") {
+			this.recordConversation("pool", finalResponse);
+		} else {
+			this.recordConversation(
+				"pool",
+				`Task executed: ${finalResponse.summary.slice(0, 200)}`,
+			);
+		}
+
+		return finalResponse;
 	}
 
 	// ── Public API: State ──────────────────────────────────────────────
@@ -862,6 +879,7 @@ export class AgentPool extends EventEmitter {
 	 * Destroys the pool and all managed agents.
 	 *
 	 * After calling `destroy()`, the pool cannot be reused.
+	 * Clears the conversation history.
 	 */
 	async destroy(): Promise<void> {
 		if (this._destroyed) return;
@@ -874,6 +892,9 @@ export class AgentPool extends EventEmitter {
 		this.logger.info("Destroying AgentPool");
 
 		await this.destroyManagedAgents();
+
+		// Clear conversation history
+		this.conversationHistory.length = 0;
 
 		this.emitPoolEvent(PoolEvent.DESTROYED, {});
 
@@ -2427,10 +2448,11 @@ export class AgentPool extends EventEmitter {
 	// ── Private: Intent Analysis ───────────────────────────────────────
 
 	/**
-	 * Analyzes a user message to determine their intent.
+	 * Analyzes a user message to determine their intent(s).
 	 *
 	 * Uses the intent-analyzer LLM conversation to classify the
-	 * message into one of the defined intent categories.
+	 * message into one or more intent categories. Includes recent
+	 * conversation history for contextual reference resolution.
 	 */
 	private async analyzeIntent(message: string): Promise<IntentAnalysis> {
 		try {
@@ -2442,13 +2464,16 @@ export class AgentPool extends EventEmitter {
 			const prompt = intentAnalysisPrompt({
 				message: sanitized,
 				poolState,
+				conversationHistory: this.conversationHistory.slice(
+					-AgentPool.MAX_CONVERSATION_HISTORY,
+				),
 			});
 
 			const analysis = await this.conversations.sendOneShotJson(
 				ConversationRole.INTENT_ANALYZER,
 				prompt,
 				validateIntentAnalysis,
-				{ maxTokens: 300 },
+				{ maxTokens: 500 },
 			);
 
 			return analysis;
@@ -2462,11 +2487,217 @@ export class AgentPool extends EventEmitter {
 
 			// Fallback: treat the message as a new task
 			return {
-				intent: UserIntent.NEW_TASK,
-				confidence: 0.5,
-				parameters: { task: message },
+				intents: [
+					{
+						intent: UserIntent.NEW_TASK,
+						confidence: 0.5,
+						parameters: { task: message },
+					},
+				],
+				primaryIntent: UserIntent.NEW_TASK,
 				reasoning: "Intent analysis failed — defaulting to new_task",
 			};
+		}
+	}
+
+	// ── Private: Conversation History ──────────────────────────────────
+
+	/**
+	 * Records a message in the conversation history.
+	 * Enforces MAX_CONVERSATION_HISTORY limit.
+	 */
+	private recordConversation(role: "user" | "pool", content: string): void {
+		this.conversationHistory.push({
+			role,
+			content: content.slice(0, 500), // Truncate long responses
+			timestamp: isoNow(),
+		});
+
+		// Enforce limit
+		while (
+			this.conversationHistory.length > AgentPool.MAX_CONVERSATION_HISTORY
+		) {
+			this.conversationHistory.shift();
+		}
+	}
+
+	// ── Private: Intent Conflict Resolution ────────────────────────────
+
+	/**
+	 * Resolves conflicts between detected intents.
+	 *
+	 * Rules:
+	 * 1. If `cancel` is present with `new_task`, keep only `cancel`.
+	 * 2. If `cancel` is present with `context_injection`, keep only `cancel`.
+	 * 3. If multiple `new_task` are present, keep only the first.
+	 * 4. `approve_agent` is always processed first if present.
+	 *
+	 * @param intents - The detected intents to resolve.
+	 * @returns The resolved intents, potentially reordered or filtered.
+	 */
+	private resolveIntentConflicts(intents: DetectedIntent[]): DetectedIntent[] {
+		const hasCancel = intents.some((i) => i.intent === UserIntent.CANCEL);
+
+		if (hasCancel) {
+			// Cancel overrides new_task and context_injection
+			return intents.filter(
+				(i) =>
+					i.intent === UserIntent.CANCEL ||
+					i.intent === UserIntent.STATUS_QUERY ||
+					i.intent === UserIntent.NOTIFICATION_PREFERENCE,
+			);
+		}
+
+		// Move approve_agent to the front (must be processed first to unblock agents)
+		const sorted = [...intents].sort((a, b) => {
+			if (a.intent === UserIntent.APPROVE_AGENT) return -1;
+			if (b.intent === UserIntent.APPROVE_AGENT) return 1;
+			return 0;
+		});
+
+		// Deduplicate intents (keep first occurrence of each type)
+		const seen = new Set<UserIntent>();
+		return sorted.filter((i) => {
+			if (seen.has(i.intent)) return false;
+			seen.add(i.intent);
+			return true;
+		});
+	}
+
+	// ── Private: Single Intent Handler ─────────────────────────────────
+
+	/**
+	 * Handles a single detected intent and returns a response.
+	 *
+	 * This method contains the dispatch logic for each intent type,
+	 * factored out from the old switch/case in send() to be called
+	 * per-intent in the multi-intent loop.
+	 *
+	 * @param detected - The detected intent with parameters.
+	 * @param originalMessage - The original user message (used as fallback for task text).
+	 * @returns The response string or AgentPoolResult.
+	 */
+	private async handleSingleIntent(
+		detected: DetectedIntent,
+		originalMessage: string,
+	): Promise<string | AgentPoolResult> {
+		switch (detected.intent) {
+			case UserIntent.APPROVE_AGENT: {
+				return this.handleApprovalIntent(detected);
+			}
+
+			case UserIntent.NEW_TASK: {
+				const taskText =
+					typeof detected.parameters.task === "string"
+						? detected.parameters.task
+						: originalMessage;
+				return this.execute(taskText);
+			}
+
+			case UserIntent.NOTIFICATION_PREFERENCE: {
+				const enabled = detected.parameters.enabled !== false;
+				const minSignificance =
+					typeof detected.parameters.minSignificance === "number"
+						? detected.parameters.minSignificance
+						: 0.5;
+
+				this.notificationEngine.setPreference({
+					enabled,
+					minSignificance,
+				});
+
+				return enabled
+					? `Notifications enabled (minimum significance: ${minSignificance}).`
+					: "Notifications disabled.";
+			}
+
+			case UserIntent.STATUS_QUERY: {
+				const state = this.getState();
+				if (!state.executing) {
+					return "The pool is idle. No task is currently being executed.";
+				}
+
+				const lines: string[] = [
+					`**Current Task**: ${state.currentTask}`,
+					`**Strategy**: ${state.strategy}`,
+					`**Active Agents**: ${state.activeAgentCount}`,
+					"",
+					"**Agents**:",
+				];
+
+				for (const agent of state.agents) {
+					lines.push(
+						`- ${agent.agentName} (${agent.taskRole}): ${agent.completed ? "✅ completed" : `⚙️ ${agent.status}`}`,
+					);
+				}
+
+				return lines.join("\n");
+			}
+
+			case UserIntent.CONTEXT_INJECTION: {
+				const instructions =
+					typeof detected.parameters.instructions === "string"
+						? detected.parameters.instructions
+						: originalMessage;
+
+				if (this.managedAgents.size === 0) {
+					return "No active agents to inject context into.";
+				}
+
+				// Inject into all active agents as structured context
+				let injectedCount = 0;
+				for (const { agent } of this.managedAgents.values()) {
+					if (agent.status !== AgentStatus.DESTROYED) {
+						try {
+							const injection: StructuredContextInjection = {
+								content: instructions,
+								priority: ContextInjectionPriority.HIGH,
+								category: ContextInjectionCategory.USER_INSTRUCTION,
+								source: "user",
+								dependencyType: null,
+								timestamp: isoNow(),
+							};
+							agent.injectContext(injection);
+							injectedCount++;
+						} catch {
+							// Agent may have been destroyed between the check and the call
+						}
+					}
+				}
+
+				return `Context injected into ${injectedCount} active agent(s).`;
+			}
+
+			case UserIntent.CANCEL: {
+				if (!this._executing) {
+					return "No task is currently executing.";
+				}
+
+				await this.destroyManagedAgents();
+				return "Current execution cancelled. All agents destroyed.";
+			}
+
+			case UserIntent.REPLAN: {
+				if (!this._executing || !this._currentAnalysis) {
+					return "No active execution to replan.";
+				}
+
+				// Note: Full user-triggered replanning requires async coordination
+				// with the running execution loop. For this evolution, the intent
+				// is recognized but the actual trigger mechanism uses automatic
+				// triggers (failure, deadlock, cascading failures).
+				return "Replan evaluation requested. The system will evaluate whether the current plan should be modified.";
+			}
+
+			default:
+				return (
+					"I couldn't understand your request. You can:\n" +
+					"- Send a task to execute\n" +
+					"- Ask about current status\n" +
+					"- Request notifications (e.g., 'notify me of important changes')\n" +
+					"- Inject context into running agents\n" +
+					"- Cancel the current execution"
+				);
 		}
 	}
 
@@ -2480,17 +2711,18 @@ export class AgentPool extends EventEmitter {
 	 * - Otherwise, resolves all pending approvals.
 	 * - Supports both approval (`approved: true`) and denial (`approved: false`).
 	 *
+	 * @param detected - The detected intent with approval parameters.
 	 * @returns A human-readable summary of the resolution.
 	 */
-	private handleApprovalIntent(intent: IntentAnalysis): string {
+	private handleApprovalIntent(detected: DetectedIntent): string {
 		if (!this.approvalManager.hasPending()) {
 			return "No pending approval requests to resolve.";
 		}
 
-		const approved = intent.parameters.approved !== false;
+		const approved = detected.parameters.approved !== false;
 		const targetAgent =
-			typeof intent.parameters.targetAgent === "string"
-				? intent.parameters.targetAgent
+			typeof detected.parameters.targetAgent === "string"
+				? detected.parameters.targetAgent
 				: undefined;
 
 		let resolution: ApprovalResolution;
