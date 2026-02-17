@@ -167,6 +167,41 @@ export interface TaskDependency {
 	readonly type: "blocking" | "informational";
 }
 
+// ── Significance Context Types ─────────────────────────────────────────────
+
+/**
+ * Contextual information used by the InformationBroker to compute
+ * dynamic significance thresholds for delta evaluation.
+ *
+ * The threshold adapts based on the current state of execution,
+ * the relationship between agents, and the nature of the delta.
+ */
+export interface SignificanceContext {
+	/** Total number of subtasks in the current execution. */
+	readonly totalSubtasks: number;
+
+	/** Number of subtasks that have completed successfully. */
+	readonly completedSubtasks: number;
+
+	/** Number of subtasks that have failed. */
+	readonly failedSubtasks: number;
+
+	/**
+	 * Execution phase derived from completion ratio.
+	 * - "early": 0-30% completion — exploration, alignment phase
+	 * - "mid": 30-70% completion — active production phase
+	 * - "late": 70-100% completion — finalization, integration phase
+	 */
+	readonly phase: "early" | "mid" | "late";
+
+	/**
+	 * Total number of deltas already processed in this execution.
+	 * Used to detect "chatty" executions where the threshold should
+	 * be raised to reduce LLM call volume.
+	 */
+	readonly totalDeltasProcessed: number;
+}
+
 // ── Structured Context Injection Types ─────────────────────────────────────
 
 /**

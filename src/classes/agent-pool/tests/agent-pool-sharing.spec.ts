@@ -44,6 +44,7 @@ describe("AgentPool handleDelta — sharing behavior", () => {
 			evaluate,
 			evaluateWithFullResult,
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 		};
 
 		(pool as any).informationBroker = mockBroker;
@@ -108,6 +109,7 @@ describe("AgentPool handleDelta — sharing behavior", () => {
 			evaluate,
 			evaluateWithFullResult,
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 		};
 
 		(pool as any).informationBroker = mockBroker;
@@ -165,6 +167,7 @@ describe("AgentPool handleDelta — sharing behavior", () => {
 			evaluate,
 			evaluateWithFullResult,
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 		};
 
 		(pool as any).informationBroker = mockBroker;
@@ -213,6 +216,7 @@ describe("AgentPool handleDelta — sharing behavior", () => {
 			evaluate,
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 		};
 
 		(pool as any).informationBroker = mockBroker;

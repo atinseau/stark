@@ -142,6 +142,7 @@ describe("AgentPool handleDelta — structured injection for blocking dependency
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock((from: string, to: string) => {
 				if ((from === "t1" && to === "t2") || (from === "t2" && to === "t1")) {
 					return { from: "t1", to: "t2", type: "blocking" as const };
@@ -231,6 +232,7 @@ describe("AgentPool handleDelta — structured injection for informational depen
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock((from: string, to: string) => {
 				if ((from === "t1" && to === "t2") || (from === "t2" && to === "t1")) {
 					return { from: "t1", to: "t2", type: "informational" as const };
@@ -312,6 +314,7 @@ describe("AgentPool handleDelta — structured injection without dependency", ()
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -382,6 +385,7 @@ describe("AgentPool handleDelta — structured injection without dependency", ()
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -510,6 +514,7 @@ describe("AgentPool handleDelta — recordSharing still called after structured 
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: recordSharingMock,
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -569,6 +574,7 @@ describe("AgentPool handleDelta — CONTEXT_SHARED event emitted with structured
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -702,6 +708,7 @@ describe("AgentPool handleDelta — structured injection has timestamp", () => {
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -776,6 +783,7 @@ describe("AgentPool handleDelta — structured injection source name", () => {
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 
@@ -835,6 +843,7 @@ describe("AgentPool handleDelta — sharing summaries tracked", () => {
 			]),
 			evaluateWithFullResult: mock(async () => []),
 			recordSharing: mock(() => undefined),
+			updateSignificanceContext: mock(() => undefined),
 			findDependencyBySubtaskIds: mock(() => null),
 		};
 

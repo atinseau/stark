@@ -36,6 +36,7 @@ import type {
 	PoolManagedAgent,
 	ProjectContext,
 	SharingDecision,
+	SignificanceContext,
 	StructuredContextInjection,
 	SubTask,
 	TaskAnalysis,
@@ -1307,6 +1308,10 @@ export class AgentPool extends EventEmitter {
 		try {
 			// ── Information Sharing ─────────────────────────────────────
 			if (this.informationBroker && this.contextTracker.agentCount > 1) {
+				// Update the significance context before evaluation
+				const sigContext = this.buildSignificanceContext();
+				this.informationBroker.updateSignificanceContext(sigContext);
+
 				let decisions: SharingDecision[];
 
 				if (delta.type === DeltaType.PROMPT_COMPLETE) {
@@ -1469,7 +1474,47 @@ export class AgentPool extends EventEmitter {
 		}
 	}
 
-	// ── Private: Summary Generation ────────────────────────────────────
+	// ── Private: Significance Context ──────────────────────────────────
+
+	/**
+	 * Builds the current SignificanceContext from the execution state.
+	 * Called before each sharing evaluation to provide up-to-date
+	 * contextual information for dynamic threshold computation.
+	 */
+	private buildSignificanceContext(): SignificanceContext {
+		const allStates = this.contextTracker.getAllAgentStates();
+		const totalSubtasks = allStates.length;
+		const completedSubtasks = allStates.filter(
+			(s) => s.completed && !s.error,
+		).length;
+		const failedSubtasks = allStates.filter(
+			(s) => s.completed && !!s.error,
+		).length;
+
+		// Compute phase from completion ratio
+		const completionRatio =
+			totalSubtasks > 0
+				? (completedSubtasks + failedSubtasks) / totalSubtasks
+				: 0;
+		let phase: "early" | "mid" | "late";
+		if (completionRatio < 0.3) {
+			phase = "early";
+		} else if (completionRatio < 0.7) {
+			phase = "mid";
+		} else {
+			phase = "late";
+		}
+
+		return {
+			totalSubtasks,
+			completedSubtasks,
+			failedSubtasks,
+			phase,
+			totalDeltasProcessed: this._deltaCount,
+		};
+	}
+
+	// ── Private: Summary ───────────────────────────────────────────────
 
 	/**
 	 * Generates an LLM-powered summary of the full execution.

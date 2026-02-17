@@ -7,6 +7,7 @@ import type {
 	ContextDelta,
 	SharingDecision,
 	SharingRecord,
+	SignificanceContext,
 	TaskDependency,
 } from "../../types/agent-pool.types.ts";
 import { toErrorMessage } from "../../utils/errors.ts";
@@ -36,6 +37,60 @@ const MAX_SHARING_RECORDS_PER_TARGET = 20;
  * pour éviter les doublons.
  */
 const MAX_SHARING_RECORDS_IN_PROMPT = 5;
+
+// ── Dynamic Significance Threshold Constants ───────────────────────────────
+
+/**
+ * Base significance threshold — the starting point for dynamic computation.
+ * Adjusted up or down based on contextual factors.
+ */
+const BASE_SIGNIFICANCE_THRESHOLD = 0.5;
+
+/**
+ * Absolute minimum threshold — never go below this to avoid
+ * evaluating every trivial event (STATUS_CHANGE, FILE_READ, etc.).
+ */
+const MIN_SIGNIFICANCE_THRESHOLD = 0.2;
+
+/**
+ * Absolute maximum threshold — never go above this to ensure
+ * critical events (AGENT_ERROR at 1.0) are always evaluated.
+ */
+const MAX_SIGNIFICANCE_THRESHOLD = 0.85;
+
+/**
+ * Threshold reduction for agents with blocking dependents.
+ * These agents' output is critical — we evaluate more aggressively.
+ */
+const BLOCKING_DEPENDENT_REDUCTION = 0.2;
+
+/**
+ * Threshold reduction for agents with informational dependents.
+ * Less aggressive than blocking, but still reduces the threshold.
+ */
+const INFORMATIONAL_DEPENDENT_REDUCTION = 0.1;
+
+/**
+ * Phase-based threshold adjustments.
+ */
+const PHASE_ADJUSTMENTS: Record<string, number> = {
+	early: -0.1, // Lower threshold early — more exploration sharing
+	mid: 0.0, // Normal threshold during active work
+	late: 0.1, // Higher threshold late — only critical info
+};
+
+/**
+ * Number of total deltas after which the "chatty execution" penalty kicks in.
+ * Raises the threshold slightly to reduce LLM call volume.
+ */
+const CHATTY_EXECUTION_DELTA_THRESHOLD = 50;
+
+/**
+ * Threshold increase per 50 deltas beyond CHATTY_EXECUTION_DELTA_THRESHOLD.
+ * Caps at MAX_CHATTY_PENALTY to prevent total suppression.
+ */
+const CHATTY_PENALTY_PER_BATCH = 0.05;
+const MAX_CHATTY_PENALTY = 0.15;
 
 // ── Validators ─────────────────────────────────────────────────────────────
 
@@ -192,13 +247,17 @@ function validateBatchedSharingDecision(data: unknown): Array<{
  */
 export class InformationBroker {
 	/**
-	 * Minimum delta significance required to trigger sharing evaluation.
-	 *
-	 * Deltas below this threshold are silently ignored, reducing the
-	 * number of LLM calls for low-value events (file reads, status
-	 * transitions, etc.).
+	 * The base threshold provided at construction time.
+	 * Used as the starting point for dynamic computation.
 	 */
-	private readonly significanceThreshold: number;
+	private readonly baseThreshold: number;
+
+	/**
+	 * The execution context used for dynamic threshold computation.
+	 * Set by the pool orchestrator when the execution state changes.
+	 * `null` means no context is available — falls back to the base threshold.
+	 */
+	private significanceContext: SignificanceContext | null = null;
 
 	/** Running count of sharing evaluations performed. */
 	private _evaluationCount = 0;
@@ -225,14 +284,27 @@ export class InformationBroker {
 		private readonly subtaskToAgent: ReadonlyMap<string, string> = new Map(),
 		private readonly agentToSubtask: ReadonlyMap<string, string> = new Map(),
 		options?: {
-			/** Override the significance threshold (default: 0.4). */
+			/** Override the base significance threshold (default: 0.5). */
 			significanceThreshold?: number;
 		},
 	) {
-		this.significanceThreshold = options?.significanceThreshold ?? 0.6;
+		this.baseThreshold =
+			options?.significanceThreshold ?? BASE_SIGNIFICANCE_THRESHOLD;
 	}
 
 	// ── Public API ─────────────────────────────────────────────────────
+
+	/**
+	 * Updates the execution context used for dynamic threshold computation.
+	 *
+	 * Called by the pool orchestrator whenever the execution state changes
+	 * (agent completion, failure, new delta processed, etc.).
+	 *
+	 * @param context - The updated significance context.
+	 */
+	updateSignificanceContext(context: SignificanceContext): void {
+		this.significanceContext = context;
+	}
 
 	/**
 	 * Evaluates whether a context delta from one agent should be shared
@@ -241,7 +313,7 @@ export class InformationBroker {
 	 * Returns an array of {@link SharingDecision} objects — one per
 	 * candidate target agent that was evaluated. The array may be empty
 	 * if:
-	 * - The delta's significance is below the threshold
+	 * - The delta's significance is below the dynamic threshold
 	 * - There are no other active agents
 	 * - The LLM determined that sharing is not beneficial for any target
 	 *
@@ -249,16 +321,19 @@ export class InformationBroker {
 	 * @returns An array of sharing decisions (may be empty).
 	 */
 	async evaluate(delta: ContextDelta): Promise<SharingDecision[]> {
-		// Pre-filter: skip low-significance deltas
-		if (delta.significance < this.significanceThreshold) {
+		// Pre-filter: skip low-significance deltas using dynamic threshold
+		const effectiveThreshold = this.computeThreshold(delta);
+
+		if (delta.significance < effectiveThreshold) {
 			this.logger.debug(
 				{
 					agentId: delta.agentId,
 					deltaType: delta.type,
 					significance: delta.significance,
-					threshold: this.significanceThreshold,
+					threshold: effectiveThreshold,
+					phase: this.significanceContext?.phase ?? "unknown",
 				},
-				"Delta below significance threshold, skipping sharing evaluation",
+				`Delta below dynamic threshold (${delta.significance.toFixed(2)} < ${effectiveThreshold.toFixed(2)}), skipping`,
 			);
 			return [];
 		}
@@ -421,6 +496,100 @@ export class InformationBroker {
 	}
 
 	// ── Private ──────────────────────────────────────────────────────
+
+	/**
+	 * Computes the effective significance threshold for a given delta,
+	 * taking into account the current execution context.
+	 *
+	 * The computation applies a series of adjustments to the base threshold:
+	 *
+	 * 1. **Phase adjustment**: Lower threshold in early execution (more exploration),
+	 *    higher in late execution (only critical info).
+	 *
+	 * 2. **Dependency adjustment**: Lower threshold when the source agent has
+	 *    blocking or informational dependents — their output is more valuable.
+	 *    Computed internally from the broker's own dependency data.
+	 *
+	 * 3. **Chatty penalty**: Slightly raise threshold when the execution has
+	 *    produced an unusually high number of deltas (reduces LLM call volume).
+	 *
+	 * 4. **Clamping**: The final threshold is clamped to [MIN, MAX] to prevent
+	 *    extreme values.
+	 *
+	 * If no context is available, falls back to the base threshold.
+	 *
+	 * @param delta - The delta to compute the threshold for.
+	 * @returns The effective significance threshold (0.0 to 1.0).
+	 */
+	private computeThreshold(delta: ContextDelta): number {
+		if (!this.significanceContext) {
+			return this.baseThreshold;
+		}
+
+		const ctx = this.significanceContext;
+		let threshold = this.baseThreshold;
+
+		// 1. Phase adjustment
+		const phaseAdjustment = PHASE_ADJUSTMENTS[ctx.phase] ?? 0;
+		threshold += phaseAdjustment;
+
+		// 2. Dependency adjustment — compute from broker's own dependency data
+		const sourceSubtaskId = this.agentToSubtask.get(delta.agentId);
+		let hasBlockingDependents = false;
+		let hasInformationalDependents = false;
+
+		if (sourceSubtaskId) {
+			for (const dep of this.dependencies) {
+				if (dep.from === sourceSubtaskId) {
+					if (dep.type === "blocking") hasBlockingDependents = true;
+					if (dep.type === "informational") hasInformationalDependents = true;
+				}
+			}
+		}
+
+		if (hasBlockingDependents) {
+			threshold -= BLOCKING_DEPENDENT_REDUCTION;
+		} else if (hasInformationalDependents) {
+			threshold -= INFORMATIONAL_DEPENDENT_REDUCTION;
+		}
+
+		// 3. Chatty execution penalty
+		if (ctx.totalDeltasProcessed > CHATTY_EXECUTION_DELTA_THRESHOLD) {
+			const excessBatches = Math.floor(
+				(ctx.totalDeltasProcessed - CHATTY_EXECUTION_DELTA_THRESHOLD) / 50,
+			);
+			const chattyPenalty = Math.min(
+				excessBatches * CHATTY_PENALTY_PER_BATCH,
+				MAX_CHATTY_PENALTY,
+			);
+			threshold += chattyPenalty;
+		}
+
+		// 4. Clamp to valid range
+		threshold = Math.max(
+			MIN_SIGNIFICANCE_THRESHOLD,
+			Math.min(MAX_SIGNIFICANCE_THRESHOLD, threshold),
+		);
+
+		// Log the computed threshold if it differs from base
+		if (Math.abs(threshold - this.baseThreshold) > 0.01) {
+			this.logger.debug(
+				{
+					baseThreshold: this.baseThreshold,
+					effectiveThreshold: threshold,
+					phase: ctx.phase,
+					hasBlockingDeps: hasBlockingDependents,
+					hasInfoDeps: hasInformationalDependents,
+					totalDeltas: ctx.totalDeltasProcessed,
+					deltaType: delta.type,
+					deltaSignificance: delta.significance,
+				},
+				`Dynamic threshold: ${threshold.toFixed(2)} (base: ${this.baseThreshold})`,
+			);
+		}
+
+		return threshold;
+	}
 
 	/**
 	 * Builds a quick summary of a long text for sharing evaluation.
