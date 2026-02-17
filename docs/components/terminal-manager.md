@@ -19,7 +19,7 @@ c'est le TerminalManager qui traduit cette intention en un vrai processus Unix.
 | ⏳ **Attente de fin** | Promise-based `waitForExit()` pour le protocole ACP |
 | 📊 **Snapshots output** | Retourne l'output accumulé à la demande |
 | 🔪 **Kill & Release** | SIGTERM / SIGKILL et nettoyage des ressources |
-| 🔌 **Découplé** | Aucune dépendance sur Agent, ACP, Tracer ou Logger |
+| 🔌 **Découplé** | Aucune dépendance sur Agent, ACP ou Logger |
 
 ```mermaid
 graph TB
@@ -55,7 +55,7 @@ graph TB
 ```
 
 !!! tip "Découplage total"
-    Le TerminalManager ne sait **rien** de l'ACP, du Tracer, du Logger ou de l'Agent.
+    Le TerminalManager ne sait **rien** de l'ACP, du Logger ou de l'Agent.
     Il est conçu pour être testé et réutilisé indépendamment. L'Agent câble les
     callbacks après instanciation.
 
@@ -115,7 +115,7 @@ const term = manager.create({ command: "ls", args: ["-la"], cwd: "." });
 
 !!! info "Câblage dans l'Agent"
     L'Agent câble ces callbacks dans son constructeur pour émettre les événements
-    `terminal:output` et `terminal:exit`, et pour gérer les spans de tracing.
+    `terminal:output` et `terminal:exit`.
 
 ---
 
@@ -408,7 +408,7 @@ sequenceDiagram
 
     Note over A,ACF: ACPClientFactory reçoit TM par injection
 
-    A->>ACF: new ACPClientFactory(logger, tracer, emitEvent, TM, config)
+    A->>ACF: new ACPClientFactory(logger, emitEvent, TM, config)
 
     Note over PROC,ACF: Pendant un prompt, l'agent IA demande un terminal
 
@@ -434,7 +434,6 @@ Dans le constructeur de l'Agent, les callbacks sont câblés pour :
 
 1. **Émettre des événements** (`terminal:output`, `terminal:exit`)
 2. **Logger** les sorties et les codes de sortie
-3. **Gérer les spans** de tracing (enter/leave/end du span terminal)
 
 ```typescript
 // Dans le constructeur de Agent :
@@ -448,15 +447,10 @@ this.terminalManager.setOutputCallback((terminalId, stream, text) => {
 });
 
 this.terminalManager.setExitCallback((terminalId, result) => {
-  const termSpan = this.tracer.getTrackedSpan(terminalId);
-  if (termSpan) this.tracer.enterSpan(termSpan);
-
   this.logger.info(
     { terminalId, exitCode: result.exitCode, signal: result.signal },
     "Terminal exited",
   );
-
-  this.traceTerminalEnd(terminalId, result.exitCode, result.signal);
 
   this.emitTyped(AgentEvent.TERMINAL_EXIT, {
     terminalId,
@@ -580,7 +574,7 @@ manager.release(term.terminalId);
 | **Exit** | Promise-based via `exitPromise` + callback `onExit` |
 | **Kill** | `SIGKILL` (force) vs `SIGTERM` (propre) |
 | **Release** | SIGTERM + suppression du tracking |
-| **Découplage** | Aucune dépendance sur Agent, ACP, Tracer ou Logger |
+| **Découplage** | Aucune dépendance sur Agent, ACP ou Logger |
 | **IDs** | `term-{counter}-{pid}` — déterministes et lisibles |
 
 ---

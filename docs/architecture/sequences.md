@@ -28,7 +28,6 @@ Le consommateur attend `await agent.ready` avant d'envoyer des prompts.
 sequenceDiagram
     participant U as 👤 Utilisateur
     participant A as 🤖 Agent
-    participant T as 📡 Tracer
     participant L as 📝 Logger
     participant TM as 🖥️ TerminalManager
     participant CTX as 📋 ContextManager
@@ -40,20 +39,14 @@ sequenceDiagram
 
     U->>+A: new Agent(config)
 
-    A->>T: new Tracer({ enabled, endpoint })
-    T-->>A: tracer instance
-
-    A->>T: startRootSpan("agent.session")
-    T-->>A: root span
-
-    A->>L: createLogger(identity, { traceContextProvider })
+    A->>L: createLogger(identity)
     L-->>A: pino logger
 
     A->>CTX: new AgentContextManager()
     A->>TM: new TerminalManager()
 
-    A->>SUH: new SessionUpdateHandler(logger, tracer, emitEvent)
-    A->>ACF: new ACPClientFactory(logger, tracer, emitEvent, TM, config)
+    A->>SUH: new SessionUpdateHandler(logger, emitEvent)
+    A->>ACF: new ACPClientFactory(logger, emitEvent, TM, config)
 
     A->>TM: setOutputCallback(cb)
     A->>TM: setExitCallback(cb)
@@ -64,15 +57,11 @@ sequenceDiagram
 
     Note over A,PROC: Initialisation async (agent.ready)
 
-    A->>T: startOperation("agent.initialize")
-
     rect rgb(40, 40, 70)
         Note over A,PROC: Phase 1 — Spawn du processus
 
-        A->>T: startOperation("agent.initialize.spawn-process")
         A->>PROC: spawn("copilot", ["--acp", "--stdio"])
         PROC-->>A: ChildProcess (stdin/stdout pipes)
-        A->>T: endOperation(spawnPhase)
     end
 
     rect rgb(40, 40, 70)
@@ -88,24 +77,18 @@ sequenceDiagram
     rect rgb(40, 40, 70)
         Note over A,PROC: Phase 3 — Handshake ACP
 
-        A->>T: startOperation("agent.initialize.acp-protocol-init")
         A->>PROC: connection.initialize({ protocolVersion, capabilities })
         PROC-->>A: { protocolVersion, agentInfo }
-        A->>T: endOperation(acpInitPhase)
         A->>L: info("ACP protocol initialized")
     end
 
     rect rgb(40, 40, 70)
         Note over A,PROC: Phase 4 — Création de session
 
-        A->>T: startOperation("agent.initialize.create-session")
         A->>PROC: connection.newSession({ cwd, mcpServers })
         PROC-->>A: { sessionId }
-        A->>T: endOperation(sessionPhase)
         A->>L: info("Session created")
     end
-
-    A->>T: endOperation(initSpan)
 
     Note over A: Status: IDLE
 
@@ -114,8 +97,7 @@ sequenceDiagram
 ```
 
 !!! info "Gestion des erreurs"
-    Si n'importe quelle phase échoue, l'erreur est propagée via le span de tracing
-    (marqué `ERROR`), le status passe à `ERROR`, et un événement `agent:error` est émis.
+    Si n'importe quelle phase échoue, le status passe à `ERROR`, et un événement `agent:error` est émis.
     La promise `agent.ready` est rejetée.
 
 ---
@@ -129,7 +111,6 @@ sequenceDiagram
     participant U as 👤 Utilisateur
     participant A as 🤖 Agent
     participant CTX as 📋 ContextManager
-    participant T as 📡 Tracer
     participant SUH as 🔀 SessionUpdateHandler
     participant L as 📝 Logger
     participant CONN as 🔌 ACP Connection
@@ -151,9 +132,6 @@ sequenceDiagram
     A->>A: emit(AGENT_BUSY)
     A->>A: emit(PROMPT_START, { promptText, promptIndex })
 
-    A->>T: startActiveSpan("agent.prompt", { index, text })
-    T-->>A: promptSpan
-
     A->>L: info("Prompt: Crée un serveur HTTP")
 
     A->>+CONN: connection.prompt({ sessionId, prompt })
@@ -174,11 +152,9 @@ sequenceDiagram
 
         else tool_call
             Note over SUH: Voir flux "Tool Call" ci-dessous
-            SUH->>T: startOperation("agent.tool_call")
             SUH->>A: emitEvent(TOOL_START)
 
         else usage_update
-            SUH->>T: recordEvent("usage.update")
             SUH->>A: emitEvent(USAGE_UPDATE, { percent, cost })
 
         else plan
@@ -190,8 +166,6 @@ sequenceDiagram
 
     A->>A: emit(PROMPT_COMPLETE, { stopReason, fullText })
     A->>L: info("Prompt completed")
-
-    A->>T: endActiveSpan(promptSpan)
 
     Note over A: Status: IDLE
 
@@ -221,23 +195,18 @@ sequenceDiagram
     participant CONN as 🔌 ACP Connection
     participant ACF as 🏭 ACPClientFactory
     participant TM as 🖥️ TerminalManager
-    participant T as 📡 Tracer
     participant L as 📝 Logger
     participant A as 🤖 Agent
 
     PROC->>CONN: requestPermission({ toolCall, options })
     CONN->>ACF: handlePermission(params)
 
-    ACF->>T: tracePermissionStart(toolCallId)
-
     alt autoApprove = true
         ACF->>ACF: Cherche option "allow_once" ou "allow_always"
         ACF->>A: emitEvent(PERMISSION_GRANTED)
-        ACF->>T: tracePermissionEnd(span, "granted")
         ACF-->>CONN: { outcome: "selected", optionId }
     else autoApprove = false
         ACF->>A: emitEvent(PERMISSION_DENIED)
-        ACF->>T: tracePermissionEnd(span, "denied")
         ACF-->>CONN: { outcome: "cancelled" }
     end
 
@@ -247,7 +216,6 @@ sequenceDiagram
     TM->>TM: spawn(command, args, { cwd, shell: true })
     TM-->>ACF: ManagedTerminal { terminalId, child }
 
-    ACF->>T: traceTerminalStart(terminalId, command)
     ACF->>A: emitEvent(TERMINAL_CREATED)
     ACF-->>CONN: { terminalId }
 
@@ -262,7 +230,6 @@ sequenceDiagram
     TM-->>ACF: { exitCode: 0 }
 
     TM-->>A: onExit(terminalId, { exitCode: 0 })
-    A->>T: traceTerminalEnd(terminalId, exitCode)
     A->>A: emit(TERMINAL_EXIT, { exitCode: 0 })
 
     ACF-->>CONN: { exitCode: 0 }
@@ -281,7 +248,6 @@ sequenceDiagram
     participant PROC as ⚙️ copilot
     participant CONN as 🔌 ACP Connection
     participant ACF as 🏭 ACPClientFactory
-    participant T as 📡 Tracer
     participant FS as 📂 Node.js FS
     participant A as 🤖 Agent
 
@@ -291,22 +257,16 @@ sequenceDiagram
     CONN->>ACF: handleWriteTextFile(params)
     ACF->>A: emitEvent(FS_WRITE, { path, contentLength })
 
-    ACF->>T: traced("agent.fs.write", async (span) => ...)
-    T-->>ACF: span context
-
     ACF->>FS: mkdir(dirname(path), { recursive: true })
     ACF->>FS: writeFile(path, content, "utf-8")
     FS-->>ACF: ✅
 
-    ACF->>T: span.end() (via traced)
     ACF-->>CONN: {}
 
     Note over PROC,ACF: Lecture de fichier
 
     PROC->>CONN: readTextFile({ path })
     CONN->>ACF: handleReadTextFile(params)
-
-    ACF->>T: traced("agent.fs.read", async (span) => ...)
 
     ACF->>FS: readFile(path, "utf-8")
     FS-->>ACF: content
@@ -321,37 +281,24 @@ sequenceDiagram
 sequenceDiagram
     participant PROC as ⚙️ copilot
     participant SUH as 🔀 SessionUpdateHandler
-    participant T as 📡 Tracer
     participant A as 🤖 Agent
 
     PROC->>SUH: handle({ sessionUpdate: "tool_call", toolCallId, title, kind })
 
     SUH->>SUH: toolCalls.set(toolCallId, { title, kind })
-    SUH->>T: startOperation("agent.tool_call")
-    SUH->>T: trackSpan(toolCallId, span)
-    SUH->>T: enterSpan(span)
     SUH->>A: emitEvent(TOOL_START, { toolCallId, title, kind, command })
 
     loop Updates intermédiaires
         PROC->>SUH: handle({ sessionUpdate: "tool_call_update", status: "in_progress" })
-        SUH->>T: span.addEvent("tool.update")
         SUH->>A: emitEvent(TOOL_UPDATE, { output, exitCode })
     end
 
     alt status === "completed"
         PROC->>SUH: handle({ sessionUpdate: "tool_call_update", status: "completed" })
-        SUH->>T: removeTrackedSpan(toolCallId)
-        SUH->>T: span.setStatus(OK)
-        SUH->>T: leaveSpan(span)
-        SUH->>T: span.end()
         SUH->>A: emitEvent(TOOL_COMPLETE, { title, exitCode })
 
     else status === "failed"
         PROC->>SUH: handle({ sessionUpdate: "tool_call_update", status: "failed" })
-        SUH->>T: removeTrackedSpan(toolCallId)
-        SUH->>T: span.setStatus(ERROR)
-        SUH->>T: leaveSpan(span)
-        SUH->>T: span.end()
         SUH->>A: emitEvent(TOOL_FAILED, { title, output, exitCode })
     end
 ```
@@ -370,7 +317,6 @@ sequenceDiagram
     participant U as 👤 Utilisateur
     participant A as 🤖 Agent
     participant CTX as 📋 ContextManager
-    participant T as 📡 Tracer
 
     Note over A: Status: IDLE
 
@@ -378,7 +324,6 @@ sequenceDiagram
 
     A->>A: queued = false (status !== BUSY)
     A->>A: emit(CONTEXT_INJECTED, { instructions, queued: false })
-    A->>T: recordEvent("active", "context.injected")
     A->>CTX: inject(instructions)
     CTX->>CTX: pending.push(instructions)
 
@@ -463,7 +408,6 @@ sequenceDiagram
     participant U as 👤 Utilisateur
     participant A as 🤖 Agent
     participant TM as 🖥️ TerminalManager
-    participant T as 📡 Tracer
     participant PROC as ⚙️ copilot process
     participant CONN as 🔌 ACP Connection
 
@@ -501,18 +445,6 @@ sequenceDiagram
     A->>A: emit(AGENT_DESTROYED)
     A->>A: logger.info("Agent destroyed")
 
-    rect rgb(30, 40, 60)
-        Note over A,T: Phase 4 — Flush du tracing
-        A->>T: shutdown()
-
-        T->>T: Ferme les spans en attente (tracked, active)
-        T->>T: endRootSpan()
-        T->>T: provider.forceFlush()
-        Note over T: Tous les spans sont envoyés à Seq
-
-        T->>T: provider.shutdown()
-    end
-
     A-->>-U: void (destroy terminé)
 ```
 
@@ -523,89 +455,18 @@ sequenceDiagram
 
 ---
 
-## 6. Flux de tracing complet
-
-Ce diagramme montre la hiérarchie complète des spans créés pendant une session typique.
-
-```mermaid
-gantt
-    title Hiérarchie des spans OpenTelemetry
-    dateFormat X
-    axisFormat %s
-
-    section Root
-    agent.session                    :active, root, 0, 100
-
-    section Init
-    agent.initialize                 :init, 0, 15
-    spawn-process                    :spawn, 1, 4
-    acp-protocol-init                :acp, 5, 9
-    create-session                   :sess, 10, 14
-
-    section Prompt 1
-    agent.prompt (1)                 :p1, 16, 55
-
-    section Tool Calls
-    agent.tool_call (read file)      :tc1, 20, 28
-    agent.permission                 :perm1, 21, 23
-    agent.fs.read                    :fs1, 24, 27
-    agent.tool_call (exec command)   :tc2, 30, 48
-    agent.permission                 :perm2, 31, 33
-    agent.terminal                   :term1, 34, 46
-
-    section Prompt 2
-    agent.prompt (2)                 :p2, 56, 85
-    agent.tool_call (write file)     :tc3, 60, 72
-    agent.fs.write                   :fs2, 62, 70
-```
-
-### Corrélation Logs ↔ Traces
-
-```mermaid
-flowchart LR
-    subgraph "Span actif"
-        S[agent.tool_call<br/>SpanId: abc123]
-    end
-
-    subgraph "pino mixin"
-        M["tracer.getTraceContext()"]
-    end
-
-    subgraph "Log line"
-        LOG["{ msg: 'Tool started',<br/>  TraceId: 'xxx',<br/>  SpanId: 'abc123',<br/>  ParentSpanId: 'yyy' }"]
-    end
-
-    subgraph "Seq"
-        SEQ[Corrélation automatique<br/>Log → Span → Trace]
-    end
-
-    S --> M
-    M --> LOG
-    LOG -->|pino-seq| SEQ
-
-    style S fill:#f59e0b,stroke:#d97706
-    style SEQ fill:#10b981,stroke:#059669,color:#fff
-```
-
-!!! tip "Corrélation automatique"
-    Grâce au `mixin` Pino qui appelle `tracer.getTraceContext()` à chaque ligne de log,
-    **chaque log porte automatiquement le `SpanId` du span le plus spécifique** en cours.
-    Seq utilise ces champs (`TraceId`, `SpanId`, `ParentSpanId`) pour reconstruire la hiérarchie.
-
----
-
 ## Résumé des interactions
 
 | Flux | Composants impliqués | Événements émis |
 |------|---------------------|-----------------|
-| **Init** | Agent → Tracer → ACP → Process | `agent:ready` / `agent:error` |
-| **Prompt** | Agent → ContextManager → ACP → SUH → Tracer | `prompt:start` → `prompt:chunk`* → `prompt:complete` |
-| **Tool call** | SUH → Tracer, ACF → TerminalManager | `tool:start` → `tool:update`* → `tool:complete` / `tool:failed` |
+| **Init** | Agent → ACP → Process | `agent:ready` / `agent:error` |
+| **Prompt** | Agent → ContextManager → ACP → SUH | `prompt:start` → `prompt:chunk`* → `prompt:complete` |
+| **Tool call** | SUH, ACF → TerminalManager | `tool:start` → `tool:update`* → `tool:complete` / `tool:failed` |
 | **Terminal** | ACF → TerminalManager → Agent | `terminal:created` → `terminal:output`* → `terminal:exit` |
-| **Permission** | ACF → Tracer → Agent | `permission:requested` → `permission:granted` / `permission:denied` |
-| **FS** | ACF → Tracer → Node.js FS | `fs:read` / `fs:write` |
+| **Permission** | ACF → Agent | `permission:requested` → `permission:granted` / `permission:denied` |
+| **FS** | ACF → Node.js FS | `fs:read` / `fs:write` |
 | **Context** | Agent → ContextManager | `context:injected` |
-| **Destroy** | Agent → TerminalManager → Tracer → Process | `agent:destroyed` |
+| **Destroy** | Agent → TerminalManager → Process | `agent:destroyed` |
 
 ---
 

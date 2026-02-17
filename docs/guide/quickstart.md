@@ -40,7 +40,6 @@ Les dépendances principales installées :
 |---------|------|
 | `@agentclientprotocol/sdk` | SDK du protocole ACP |
 | `pino` + `pino-pretty` + `pino-seq` | Logging multi-transport |
-| `@opentelemetry/*` | Tracing distribué |
 | `@faker-js/faker` | Génération de noms d'agents |
 
 ---
@@ -49,7 +48,7 @@ Les dépendances principales installées :
 
 Stark utilise Docker Compose pour deux services :
 
-- **Seq** — Visualisation des logs et traces (`http://localhost:8082`)
+- **Seq** — Visualisation des logs (`http://localhost:8082`)
 - **MkDocs** — Cette documentation (`http://localhost:8083`)
 
 ```bash
@@ -76,7 +75,7 @@ stark-docs    Up (healthy)    0.0.0.0:8083->8000/tcp
 !!! success "Vérification"
     Ouvrez ces URLs dans votre navigateur :
 
-    - **Seq** : [http://localhost:8082](http://localhost:8082) — Interface de logs
+    - **Seq** : [http://localhost:8082](http://localhost:8082) — Interface des logs
     - **Documentation** : [http://localhost:8083](http://localhost:8083) — Ce site
 
 ---
@@ -108,7 +107,6 @@ async function main() {
   const agent = new Agent({
     cwd: process.cwd(),
     logOutput: { console: true, seq: true },
-    tracing: true,
     autoApprove: true,
   });
 
@@ -155,14 +153,6 @@ Vous verrez les logs de votre agent avec :
 - Le **nom de l'agent** comme préfixe
 - Les **tool calls**, **terminaux** et **opérations FS**
 - Les **métriques d'usage** (tokens, coûts)
-
-### Traces (OpenTelemetry)
-
-Cliquez sur un log qui porte un `TraceId` pour voir la **trace complète** :
-
-- Le **root span** `agent.session` englobe toute la vie de l'agent
-- Les **prompt spans** montrent la durée de chaque prompt
-- Les **tool call spans** montrent ce que l'agent a exécuté
 
 ---
 
@@ -303,12 +293,8 @@ stark/
 │   │   │   ├── agent-context-manager.ts
 │   │   │   ├── agent-session-update-handler.ts
 │   │   │   └── agent-acp-client-factory.ts
-│   │   ├── terminal-manager/        # Gestion des processus
-│   │   │   └── terminal-manager.ts
-│   │   └── tracer/                  # Tracing OpenTelemetry
-│   │       ├── tracer.ts
-│   │       ├── create-tracer-provider.ts
-│   │       └── constants.ts
+│   │   └── terminal-manager/        # Gestion des processus
+│   │       └── terminal-manager.ts
 │   ├── enums/                       # AgentEvent, AgentStatus, SessionUpdateType
 │   ├── logger/                      # createLogger (Pino multi-transport)
 │   ├── types/                       # Types TypeScript (events, config, observability)

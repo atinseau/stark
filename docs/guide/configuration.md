@@ -30,9 +30,6 @@ const agent = new Agent({
   },
   logLevel: "info",
 
-  // Tracing
-  tracing: true,
-
   // MCP Servers
   mcpServers: [],
 });
@@ -50,7 +47,7 @@ const agent = new Agent({
 | **Défaut** | Généré automatiquement par Faker.js (`"Adjective FirstName"`) |
 | **Requis** | Non |
 
-Le nom humain de l'agent, utilisé dans les logs, les événements et le tracing.
+Le nom humain de l'agent, utilisé dans les logs et les événements.
 
 ```typescript
 // Nom auto-généré (ex: "Swift Nova", "Clever Atlas", "Bold Orion")
@@ -69,7 +66,6 @@ console.log(agent.name); // "Jarvis"
 | Logs Pino | `agentName` (dans chaque ligne) |
 | Événements | `event.agent.name` |
 | Console (pino-pretty) | Préfixe du message : `Swift Nova \| Tool started` |
-| Spans OpenTelemetry | Attribut `agent.name` sur le root span |
 
 ---
 
@@ -99,7 +95,6 @@ console.log(agent.id); // "agent-prod-001"
 |----------|-------|
 | Logs Pino | `agentId` |
 | Événements | `event.agent.id` |
-| Spans OpenTelemetry | Attribut `agent.id` sur le root span |
 | Snapshot | `snapshot().identity.id` |
 
 ---
@@ -419,56 +414,6 @@ const agent = new Agent({ logLevel: "error" });
 
 ---
 
-### `tracing` — Configuration du tracing OpenTelemetry
-
-| Propriété | Valeur |
-|-----------|--------|
-| **Type** | `boolean \| string \| undefined` |
-| **Défaut** | `false` |
-| **Requis** | Non |
-
-Active ou désactive le tracing distribué via OpenTelemetry. Les traces sont exportées
-vers un endpoint OTLP (typiquement Seq).
-
-| Valeur | Effet |
-|--------|-------|
-| `false` | Tracing désactivé — toutes les méthodes du Tracer retournent des no-op spans |
-| `true` | Tracing activé — endpoint dérivé de `$SEQ_URL` ou `http://localhost:5341/ingest/otlp/v1/traces` |
-| `string` | Tracing activé — utilise l'URL fournie comme endpoint OTLP |
-
-```typescript
-// Désactivé (défaut)
-const agent = new Agent({ tracing: false });
-
-// Activé avec l'endpoint par défaut
-const agent = new Agent({ tracing: true });
-
-// Activé avec un endpoint custom
-const agent = new Agent({
-  tracing: "http://otel-collector:4318/v1/traces",
-});
-```
-
-**Résolution de l'endpoint OTLP :**
-
-1. Valeur `string` dans `tracing`
-2. `$SEQ_URL` + `/ingest/otlp/v1/traces`
-3. `http://localhost:5341/ingest/otlp/v1/traces`
-
-**Quand le tracing est activé :**
-
-- Un span racine `agent.session` est créé au démarrage
-- Chaque prompt crée un span `agent.prompt`
-- Les tool calls créent des spans `agent.tool_call`
-- Les opérations FS créent des spans `agent.fs.read` / `agent.fs.write`
-- Les permissions créent des spans `agent.permission`
-- Les terminaux créent des spans `agent.terminal`
-- Chaque ligne de log porte le `TraceId` / `SpanId` du span actif (via le mixin Pino)
-
-Voir la documentation du [Tracer](../components/tracer.md) pour les détails complets.
-
----
-
 ### `mcpServers` — Serveurs MCP
 
 | Propriété | Valeur |
@@ -569,7 +514,6 @@ const agent = new Agent({
     seq: true,                           // Visualiser dans Seq
   },
   logLevel: "info",
-  tracing: true,                         // Traces dans Seq
   autoApprove: true,                     // Pas de blocage
 });
 ```
@@ -584,7 +528,6 @@ const agent = new Agent({
     json: false,
     seq: false,
   },
-  tracing: false,
   autoApprove: true,
 });
 ```
@@ -600,7 +543,6 @@ const agent = new Agent({
     seq: false,                          // Pas de Seq en CI
   },
   logLevel: "debug",                     // Capturer les détails
-  tracing: false,                        // Pas de tracing en CI
   autoApprove: true,
 });
 ```
@@ -625,7 +567,6 @@ const agent = new Agent({
     },
   },
   logLevel: "info",
-  tracing: process.env.SEQ_URL ?? "http://seq.internal:5341/ingest/otlp/v1/traces",
   autoApprove: false,  // ⚠️ Sécurité !
 });
 ```
@@ -656,9 +597,6 @@ interface AgentConfig {
 
   /** Niveau minimum de log global. Défaut: "info" */
   logLevel?: pino.Level;
-
-  /** Tracing OpenTelemetry. false | true | URL string. Défaut: false */
-  tracing?: boolean | string;
 
   /** Auto-approve des permissions. Défaut: true */
   autoApprove?: boolean;
@@ -706,7 +644,6 @@ interface SeqTransportConfig {
 | `logOutput.json` | `boolean \| string \| object` | `false` | Fichier NDJSON structuré |
 | `logOutput.seq` | `boolean \| string \| object` | `false` | Streaming HTTP vers Seq |
 | `logLevel` | `pino.Level` | `"info"` | Niveau minimum de log global |
-| `tracing` | `boolean \| string` | `false` | Tracing OpenTelemetry |
 | `mcpServers` | `McpServer[]` | `[]` | Serveurs MCP à connecter |
 
 ---
@@ -716,6 +653,5 @@ interface SeqTransportConfig {
 - [**Démarrage rapide**](quickstart.md) — Installer et lancer votre premier agent
 - [**Agent**](../components/agent.md) — L'orchestrateur qui consomme cette configuration
 - [**Logger**](../components/logger.md) — Détail des transports de logging
-- [**Tracer**](../components/tracer.md) — Détail du tracing OpenTelemetry
 - [**ACPClientFactory**](../components/acp-client-factory.md) — Comportement de `autoApprove`
 - [**Architecture**](../architecture/overview.md) — Vue d'ensemble du système

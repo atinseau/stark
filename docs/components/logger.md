@@ -2,23 +2,20 @@
 
 > Le `Logger` est le système de logging multi-transport de Stark. Construit sur **Pino**,
 > il envoie simultanément des logs colorisés en console, du JSON structuré dans un fichier,
-> et des événements enrichis vers **Seq** — le tout avec une corrélation automatique
-> aux traces OpenTelemetry.
+> et des événements enrichis vers **Seq**.
 
 ---
 
 ## Rôle et importance
 
-Le Logger est la **couche d'observabilité événementielle** de Stark. Là où le [Tracer](tracer.md)
-capture des **durées** (spans), le Logger capture des **instants** : "Tool started",
-"Prompt completed", "Terminal exited".
+Le Logger est la **couche d'observabilité événementielle** de Stark. Il capture des **instants** :
+"Tool started", "Prompt completed", "Terminal exited".
 
 | Responsabilité | Description |
 |----------------|-------------|
 | 📤 **Multi-transport** | Console + JSON + Seq, actifs simultanément |
 | 🎨 **Affichage humain** | `pino-pretty` avec couleurs et timestamps lisibles |
 | 📊 **Logs structurés** | JSON avec des champs typés pour l'analyse |
-| 🔗 **Corrélation traces** | Chaque log porte le `TraceId`/`SpanId` du span actif |
 | 🏷️ **Identité agent** | Chaque ligne porte `agentId` et `agentName` |
 | 🔇 **Mode silencieux** | Logger sans output pour les tests |
 | ⚙️ **Niveaux par transport** | Console en `info`, JSON en `debug`, Seq en `trace` |
@@ -26,7 +23,6 @@ capture des **durées** (spans), le Logger capture des **instants** : "Tool star
 ```mermaid
 graph TB
     subgraph "createLogger()"
-        MX["Pino Mixin<br/><code>getTraceContext()</code>"]
         BASE["Base bindings<br/><code>agentId, agentName</code>"]
         MS["pino.multistream()"]
     end
@@ -43,7 +39,6 @@ graph TB
         SEQ[(Seq)]
     end
 
-    MX --> MS
     BASE --> MS
     MS --> PRETTY --> TERM
     MS --> JSON --> FILE
@@ -51,7 +46,6 @@ graph TB
 
     style MS fill:#3b82f6,stroke:#2563eb,color:#fff
     style SEQ fill:#10b981,stroke:#059669,color:#fff
-    style MX fill:#f59e0b,stroke:#d97706
 ```
 
 ---
@@ -177,7 +171,7 @@ logOutput: { console: false }
 Le transport **JSON** écrit des lignes JSON structurées, idéales pour l'analyse :
 
 ```json
-{"level":30,"time":1705312327421,"agentId":"agent-001","agentName":"Swift Nova","toolCallId":"tc-1","msg":"Tool started","TraceId":"abc...","SpanId":"def..."}
+{"level":30,"time":1705312327421,"agentId":"agent-001","agentName":"Swift Nova","toolCallId":"tc-1","msg":"Tool started"}
 {"level":30,"time":1705312327523,"agentId":"agent-001","agentName":"Swift Nova","terminalId":"term-1","command":"docker info","msg":"Terminal created"}
 ```
 
@@ -231,86 +225,6 @@ logOutput: {
 !!! tip "Docker Compose"
     Seq est fourni dans le `docker-compose.yml` du projet. Lancez `docker compose up -d`
     puis ouvrez `http://localhost:8082` pour visualiser vos logs.
-
----
-
-## Corrélation Traces ↔ Logs
-
-### Le mécanisme `mixin`
-
-Le lien entre logs et traces est réalisé via le **mixin Pino** — une fonction appelée
-à **chaque écriture de log** qui injecte dynamiquement le contexte de trace actuel :
-
-```typescript
-const logger = createLogger(identity, {
-  logOutput: { console: true, seq: true },
-  logLevel: "info",
-  traceContextProvider: () => tracer.getTraceContext(),
-  //                         ↑ Appelé à chaque log !
-});
-```
-
-```mermaid
-sequenceDiagram
-    participant CODE as Code appelant
-    participant PINO as Pino Logger
-    participant MX as Mixin function
-    participant T as Tracer
-
-    CODE->>PINO: logger.info("Tool started")
-
-    PINO->>MX: mixin()
-    MX->>T: getTraceContext()
-    T-->>MX: { TraceId: "abc", SpanId: "def", ParentSpanId: "ghi" }
-    MX-->>PINO: { TraceId: "abc", SpanId: "def", ParentSpanId: "ghi" }
-
-    PINO->>PINO: Merge base + mixin + bindings + message
-
-    Note over PINO: Résultat :<br/>{ agentId, agentName,<br/>  TraceId, SpanId, ParentSpanId,<br/>  msg: "Tool started" }
-
-    PINO->>PINO: Envoie à tous les streams
-```
-
-### Ce que ça donne dans les logs
-
-Chaque ligne de log contient automatiquement :
-
-| Champ | Source | Exemple |
-|-------|--------|---------|
-| `agentId` | Base bindings (statique) | `"a1b2c3d4-..."` |
-| `agentName` | Base bindings (statique) | `"Swift Nova"` |
-| `TraceId` | Mixin (dynamique) | `"abc123def456..."` (32 hex) |
-| `SpanId` | Mixin (dynamique) | `"1a2b3c4d..."` (16 hex) |
-| `ParentSpanId` | Mixin (dynamique) | `"5e6f7g8h..."` (16 hex, optionnel) |
-
-### Résultat dans Seq
-
-Seq utilise automatiquement les champs `TraceId` et `SpanId` pour :
-
-- Regrouper les logs par trace
-- Afficher les logs dans le contexte de leur span
-- Reconstruire la hiérarchie span → parent même sans données OTLP
-
-```mermaid
-flowchart LR
-    subgraph "Log Event dans Seq"
-        L["msg: Tool started<br/>TraceId: abc...<br/>SpanId: def...<br/>ParentSpanId: ghi..."]
-    end
-
-    subgraph "Trace dans Seq"
-        T1[agent.session] --> T2[agent.prompt]
-        T2 --> T3["agent.tool_call ← SpanId: def..."]
-    end
-
-    L -.->|corrélation auto| T3
-
-    style T3 fill:#f59e0b,stroke:#d97706
-    style L fill:#3b82f6,stroke:#2563eb,color:#fff
-```
-
-!!! info "Convention PascalCase"
-    Les champs de trace sont nommés `TraceId`, `SpanId`, `ParentSpanId` (PascalCase)
-    car c'est la convention attendue par Seq pour la corrélation automatique.
 
 ---
 
@@ -457,7 +371,7 @@ L'Agent crée le logger dans son constructeur et l'injecte dans tous les sous-co
 ```mermaid
 flowchart TD
     A["Agent constructor"]
-    A --> CREATE["createLogger(identity, {<br/>  logOutput, logLevel,<br/>  traceContextProvider<br/>})"]
+    A --> CREATE["createLogger(identity, {<br/>  logOutput, logLevel<br/>})"]
     CREATE --> L["pino.Logger"]
 
     L --> SUH["SessionUpdateHandler<br/><em>logger injecté</em>"]
@@ -513,13 +427,8 @@ L'URL de Seq est résolue dans cet ordre :
 | **Performance** | ⚡ Très rapide (JSON.stringify natif) | 🐌 Plus lent | 🐌 Plus lent |
 | **Structuré par défaut** | ✅ JSON natif | ⚠️ Optionnel | ✅ JSON natif |
 | **Multi-stream** | ✅ `pino.multistream()` | ✅ Transports | ⚠️ Streams |
-| **Mixin dynamique** | ✅ Appel à chaque log | ❌ Non | ❌ Non |
 | **Compatibilité Bun** | ✅ Via multistream | ⚠️ Partiel | ⚠️ Partiel |
 | **Écosystème** | ✅ pino-pretty, pino-seq | ✅ Large | ❌ Limité |
-
-Le **mixin dynamique** est crucial pour Stark : c'est ce qui permet d'injecter le
-`TraceId`/`SpanId` du span **actuellement actif** dans chaque log, sans avoir besoin
-de passer manuellement le contexte de trace partout.
 
 ---
 
@@ -529,7 +438,6 @@ de passer manuellement le contexte de trace partout.
 |---------|-------------|
 | **Fabrique** | `createLogger()` — construit un logger Pino multi-stream |
 | **Transports** | Console (pino-pretty), JSON (fichier), Seq (HTTP) |
-| **Corrélation** | Mixin Pino → `tracer.getTraceContext()` → `TraceId`/`SpanId` |
 | **Niveaux** | Configurable par transport, résolution automatique du global |
 | **Identité** | `agentId` + `agentName` dans chaque ligne |
 | **Compatibilité** | `multistream()` au lieu de `transport()` pour Bun |
@@ -539,7 +447,6 @@ de passer manuellement le contexte de trace partout.
 ## Liens
 
 - [**Architecture**](../architecture/overview.md) — Vue d'ensemble du système
-- [**Tracer**](tracer.md) — Fournit le `getTraceContext()` pour la corrélation
 - [**Agent**](agent.md) — Crée et configure le Logger
 - [**Configuration**](../guide/configuration.md) — Options `logOutput` et `logLevel`
 - [**Démarrage rapide**](../guide/quickstart.md) — Voir les logs en action avec Seq

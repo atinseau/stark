@@ -1,7 +1,7 @@
 # 🤖 Agent — L'orchestrateur principal
 
 > La classe `Agent` est le **point d'entrée unique** du système Stark.
-> Elle orchestre toutes les autres briques — ACP, Tracer, Logger, TerminalManager —
+> Elle orchestre toutes les autres briques — ACP, Logger, TerminalManager —
 > et expose une API simple pour interagir avec un agent IA.
 
 ---
@@ -17,7 +17,7 @@ dépendances sont assemblées. Il remplit 6 missions fondamentales :
 | 💬 **Envoi de prompts** | API `prompt()` avec gestion du contexte et du streaming |
 | 📡 **Événements typés** | Étend `EventEmitter` avec un typage fort pour l'orchestration |
 | 💉 **Injection de contexte** | Modifie le comportement de l'agent au vol |
-| 📊 **Observabilité** | Chaque action est loguée, tracée et émise comme événement |
+| 📊 **Observabilité** | Chaque action est loguée et émise comme événement |
 | 🧹 **Cycle de vie** | Initialisation asynchrone et destruction propre |
 
 ```mermaid
@@ -30,7 +30,6 @@ graph TB
         A --> SUH[SessionUpdateHandler]
         A --> ACF[ACPClientFactory]
         A --> TM[TerminalManager]
-        A --> T[Tracer]
         A --> L[Logger]
     end
 
@@ -87,8 +86,6 @@ const agent = new Agent({
   },
   logLevel: "info",
 
-  // ── Tracing ───────────────────────────────────────
-  tracing: true,  // OpenTelemetry → Seq (ou URL custom)
 });
 ```
 
@@ -288,7 +285,6 @@ L'ordre de nettoyage est strict :
 4. **Attente de la connexion** (timeout 500ms)
 5. **SIGTERM au processus** (puis SIGKILL après 2s si nécessaire)
 6. **Émission de `AGENT_DESTROYED`**
-7. **Flush + shutdown du Tracer** (tous les spans exportés)
 
 !!! danger "Irréversible"
     Une fois `destroy()` appelé, l'instance d'agent ne peut plus être réutilisée.
@@ -338,7 +334,7 @@ L'identité est injectée dans :
 
 - Chaque **ligne de log** (champs `agentId`, `agentName`)
 - Chaque **événement émis** (champ `agent`)
-- Le **span racine** du tracing (attributs `agent.id`, `agent.name`)
+
 
 ---
 
@@ -385,27 +381,21 @@ Le constructeur de l'Agent assemble toutes les dépendances dans un ordre préci
 flowchart TD
     CONFIG["1. Résolution config<br/>(defaults + overrides)"]
     IDENTITY["2. Génération identité<br/>(UUID + Faker name)"]
-    TRACER["3. Création Tracer<br/>(avant le logger !)"]
-    ROOT["4. Root span<br/>agent.session"]
-    LOGGER["5. Création Logger<br/>(avec traceContextProvider)"]
-    CTX["6. ContextManager"]
-    TM["7. TerminalManager"]
-    SUH["8. SessionUpdateHandler<br/>(logger, tracer, emitEvent)"]
-    ACF["9. ACPClientFactory<br/>(logger, tracer, emitEvent, TM, config)"]
-    WIRE["10. Câblage callbacks TM"]
-    INIT["11. Lancement init async<br/>(agent.ready)"]
+    LOGGER["3. Création Logger"]
+    CTX["4. ContextManager"]
+    TM["5. TerminalManager"]
+    SUH["6. SessionUpdateHandler<br/>(logger, emitEvent)"]
+    ACF["7. ACPClientFactory<br/>(logger, emitEvent, TM, config)"]
+    WIRE["8. Câblage callbacks TM"]
+    INIT["9. Lancement init async<br/>(agent.ready)"]
 
-    CONFIG --> IDENTITY --> TRACER --> ROOT --> LOGGER
+    CONFIG --> IDENTITY --> LOGGER
     LOGGER --> CTX --> TM --> SUH --> ACF --> WIRE --> INIT
 
-    style TRACER fill:#f59e0b,stroke:#d97706
     style LOGGER fill:#3b82f6,stroke:#2563eb,color:#fff
 ```
 
-!!! info "Ordre crucial"
-    Le **Tracer** est créé **avant** le Logger car le logger a besoin d'un
-    `traceContextProvider` (le mixin Pino qui injecte `TraceId`/`SpanId` dans
-    chaque ligne de log). Le root span doit aussi exister avant le premier log.
+
 
 ---
 
@@ -416,11 +406,10 @@ L'Agent ne fait pas tout lui-même. Il délègue à des composants spécialisés
 | Composant | Responsabilité | Injecté avec |
 |-----------|---------------|--------------|
 | [**ContextManager**](context-manager.md) | File FIFO de contexte | Rien (pure logique) |
-| [**SessionUpdateHandler**](session-update-handler.md) | Router les updates ACP | `logger`, `tracer`, `emitEvent` |
-| [**ACPClientFactory**](acp-client-factory.md) | Callbacks ACP (FS, terminal, permissions) | `logger`, `tracer`, `emitEvent`, `TM`, `config` |
+| [**SessionUpdateHandler**](session-update-handler.md) | Router les updates ACP | `logger`, `emitEvent` |
+| [**ACPClientFactory**](acp-client-factory.md) | Callbacks ACP (FS, terminal, permissions) | `logger`, `emitEvent`, `TM`, `config` |
 | [**TerminalManager**](terminal-manager.md) | Gestion des processus enfants | Callbacks output/exit |
-| [**Tracer**](tracer.md) | Spans OpenTelemetry | Config tracing |
-| [**Logger**](logger.md) | Logs structurés multi-transport | Identité, trace context |
+| [**Logger**](logger.md) | Logs structurés multi-transport | Identité |
 
 ---
 
@@ -437,7 +426,6 @@ async function main() {
   const agent = new Agent({
     cwd: process.cwd(),
     logOutput: { console: true, seq: true },
-    tracing: true,
     autoApprove: true,
   });
 

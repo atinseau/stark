@@ -286,7 +286,6 @@ C'est l'état terminal et **irréversible**. L'agent a été nettoyé :
 - Tous les terminaux sont tués
 - Le stream ACP est fermé
 - Le processus copilot est terminé (SIGTERM → SIGKILL)
-- Les traces sont exportées (flush + shutdown du Tracer)
 
 ```typescript
 await agent.destroy();
@@ -565,13 +564,11 @@ flowchart TD
     S4["4. await connection.closed<br/><em>Timeout 500ms</em>"]
     S5["5. process.kill(SIGTERM)<br/><em>Puis SIGKILL après 2s</em>"]
     S6["6. emit(AGENT_DESTROYED)"]
-    S7["7. tracer.shutdown()<br/><em>Flush + export des spans</em>"]
 
-    D --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    D --> S1 --> S2 --> S3 --> S4 --> S5 --> S6
 
     style D fill:#ef4444,stroke:#dc2626,color:#fff
     style S1 fill:#f59e0b,stroke:#d97706
-    style S7 fill:#10b981,stroke:#059669,color:#fff
 ```
 
 **Pourquoi cet ordre ?**
@@ -585,10 +582,6 @@ flowchart TD
 
 3. **Stream avant le process** → Fermer le stream empêche le SDK ACP de tenter des
    écritures sur un stream mort (ce qui produirait des erreurs console bruyantes).
-
-4. **Tracer en dernier** → Le `tracer.shutdown()` est placé **après** le dernier log
-   (`"Agent destroyed"`). Sinon, le mixin Pino ne pourrait plus obtenir le `TraceId`/`SpanId`
-   (car `shutdown()` annule le root span), et les derniers logs perdraient leur corrélation.
 
 ---
 

@@ -2,7 +2,7 @@
 
 > Le `SessionUpdateHandler` est le **centre de dispatching** de Stark. Chaque notification
 > envoyée par l'agent IA pendant un prompt passe par cette brique, qui la route vers
-> le bon handler pour produire des logs, des traces et des événements typés.
+> le bon handler pour produire des logs et des événements typés.
 
 ---
 
@@ -15,7 +15,6 @@ des mises à jour de plan, des métriques d'usage, etc.
 Le SessionUpdateHandler est le **routeur** qui reçoit ce flux brut et le transforme en :
 
 - **Logs structurés** via le [Logger](logger.md) injecté
-- **Spans et événements** via le [Tracer](tracer.md) injecté
 - **Événements typés** via le callback `emitEvent` injecté
 
 | Responsabilité | Description |
@@ -48,23 +47,21 @@ flowchart LR
 
     subgraph "Sorties"
         LOG["Logger<br/><em>Logs structurés</em>"]
-        TRACE["Tracer<br/><em>Spans + events</em>"]
         EMIT["emitEvent<br/><em>Événements typés</em>"]
     end
 
     ACP --> SWITCH
     SWITCH --> MSG --> LOG & EMIT
     SWITCH --> THOUGHT --> LOG & EMIT
-    SWITCH --> TOOL --> LOG & TRACE & EMIT
-    SWITCH --> TOOL_UPD --> LOG & TRACE & EMIT
+    SWITCH --> TOOL --> LOG & EMIT
+    SWITCH --> TOOL_UPD --> LOG & EMIT
     SWITCH --> PLAN --> LOG & EMIT
-    SWITCH --> USAGE --> LOG & TRACE & EMIT
+    SWITCH --> USAGE --> LOG & EMIT
     SWITCH --> MODE --> LOG & EMIT
     SWITCH --> OTHER
 
     style SWITCH fill:#8b5cf6,stroke:#7c3aed,color:#fff
     style LOG fill:#3b82f6,stroke:#2563eb,color:#fff
-    style TRACE fill:#f59e0b,stroke:#d97706
     style EMIT fill:#10b981,stroke:#059669,color:#fff
 ```
 
@@ -72,21 +69,20 @@ flowchart LR
 
 ## Instanciation
 
-Le SessionUpdateHandler reçoit ses **trois dépendances** par injection dans le constructeur :
+Le SessionUpdateHandler reçoit ses **deux dépendances** par injection dans le constructeur :
 
 ```typescript
 import { AgentSessionUpdateHandler } from "./classes/agent/agent-session-update-handler.ts";
 
 const handler = new AgentSessionUpdateHandler(
   logger,     // pino.Logger — pour le logging structuré
-  tracer,     // Tracer — pour les spans OpenTelemetry
   emitEvent,  // EmitEventFn — callback d'émission d'événements
 );
 ```
 
 !!! info "Injecté par l'Agent"
     En pratique, c'est l'`Agent` qui crée le SessionUpdateHandler dans son constructeur
-    et lui passe ses propres instances de logger, tracer et le callback `emitTyped.bind(this)`.
+    et lui passe ses propres instances de logger et le callback `emitTyped.bind(this)`.
 
 ### Instanciation dans l'Agent
 
@@ -96,7 +92,6 @@ const emitEvent = this.emitTyped.bind(this);
 
 this.sessionUpdateHandler = new AgentSessionUpdateHandler(
   this.logger,
-  this.tracer,
   emitEvent,
 );
 ```
@@ -107,95 +102,63 @@ this.sessionUpdateHandler = new AgentSessionUpdateHandler(
 
 ### `handle(update)` — Router un update
 
-La méthode principale. Reçoit un `SessionUpdate` et le dispatche vers le handler approprié :
+La méthode principale. Reçoit un `SessionUpdate` brut et le dispatche vers le bon handler :
 
 ```typescript
-// Le SDK ACP envoie les updates via le client
+// Utilisé dans le callback onSessionUpdate de l'ACP :
 const client = acpClientFactory.build((update) => {
-  handler.handle(update);  // ← Chaque update passe ici
+  handler.handle(update);
 });
 ```
 
-En interne, `handle()` est un `switch` exhaustif sur le champ discriminant `sessionUpdate` :
+Le switch interne couvre tous les types de `SessionUpdateType` :
 
-```typescript
-handle(update: SessionUpdate): void {
-  switch (update.sessionUpdate) {
-    case SessionUpdateType.AGENT_MESSAGE_CHUNK:
-      this.handleAgentMessageChunk(update);
-      break;
-    case SessionUpdateType.AGENT_THOUGHT_CHUNK:
-      this.handleAgentThoughtChunk(update);
-      break;
-    case SessionUpdateType.TOOL_CALL:
-      this.handleToolCall(update);
-      break;
-    case SessionUpdateType.TOOL_CALL_UPDATE:
-      this.handleToolCallUpdate(update);
-      break;
-    case SessionUpdateType.PLAN:
-      this.handlePlan(update);
-      break;
-    case SessionUpdateType.USAGE_UPDATE:
-      this.handleUsageUpdate(update);
-      break;
-    // ... et tous les autres types
-    default:
-      this.logger.warn({ update }, "Unhandled session update type");
-  }
-}
-```
+| Type | Handler | Événement émis |
+|------|---------|----------------|
+| `agent_message_chunk` | `handleAgentMessageChunk` | `PROMPT_CHUNK` |
+| `agent_thought_chunk` | `handleAgentThoughtChunk` | `PROMPT_THOUGHT` |
+| `user_message_chunk` | `handleUserMessageChunk` | — |
+| `tool_call` | `handleToolCall` | `TOOL_START` |
+| `tool_call_update` | `handleToolCallUpdate` | `TOOL_UPDATE` + `TOOL_COMPLETE` / `TOOL_FAILED` |
+| `plan` | `handlePlan` | `PLAN_UPDATE` |
+| `usage_update` | `handleUsageUpdate` | `USAGE_UPDATE` |
+| `current_mode_update` | `handleCurrentModeUpdate` | `MODE_CHANGE` |
+| `config_option_update` | `handleConfigOptionUpdate` | `CONFIG_UPDATE` |
+| `session_info_update` | `handleSessionInfoUpdate` | — |
+| `available_commands_update` | `handleAvailableCommandsUpdate` | — |
 
-Le routage utilise l'enum `SessionUpdateType` pour garantir l'exhaustivité :
-
-```mermaid
-flowchart TD
-    IN["handle(update)"]
-    SW{"update.sessionUpdate"}
-
-    IN --> SW
-
-    SW -->|agent_message_chunk| AMC["handleAgentMessageChunk<br/>📝 Accumule le texte"]
-    SW -->|agent_thought_chunk| ATC["handleAgentThoughtChunk<br/>🧠 Log le raisonnement"]
-    SW -->|user_message_chunk| UMC["handleUserMessageChunk<br/>👤 Log l'écho"]
-    SW -->|tool_call| TC["handleToolCall<br/>🔧 Démarre un tool call"]
-    SW -->|tool_call_update| TCU["handleToolCallUpdate<br/>🔄 Update / Complete / Failed"]
-    SW -->|plan| PL["handlePlan<br/>📋 Plan d'exécution"]
-    SW -->|usage_update| UU["handleUsageUpdate<br/>📊 Métriques tokens"]
-    SW -->|current_mode_update| CMU["handleCurrentModeUpdate<br/>🔄 Changement de mode"]
-    SW -->|config_option_update| COU["handleConfigOptionUpdate<br/>⚙️ Config"]
-    SW -->|session_info_update| SIU["handleSessionInfoUpdate<br/>ℹ️ Métadonnées"]
-    SW -->|available_commands_update| ACU["handleAvailableCommandsUpdate<br/>📜 Commandes"]
-
-    style IN fill:#8b5cf6,stroke:#7c3aed,color:#fff
-    style SW fill:#7c3aed,stroke:#5b21b6,color:#fff
-```
+!!! warning "Type inconnu"
+    Si un type non reconnu arrive (ex : une future version du protocole), le handler
+    logue un `warn` avec le type inconnu. Pas de crash.
 
 ---
 
 ### `responseText` — Texte accumulé
 
-Pendant un prompt, chaque fragment de réponse de l'agent est accumulé dans `responseText` :
+Propriété en lecture seule qui retourne le texte de la réponse complète accumulée
+depuis le dernier `resetResponseText()` :
 
 ```typescript
-// Avant un prompt
-handler.resetResponseText();
+// Pendant le streaming :
+handler.handle(chunk1);  // "Hello "
+handler.handle(chunk2);  // "World!"
 
-// Pendant le prompt (appelé automatiquement par handle())
-// Chaque agent_message_chunk ajoute du texte
+console.log(handler.responseText); // "Hello World!"
 
-// Après le prompt
+// L'Agent utilise cette propriété pour construire le PromptResult :
 const fullText = handler.responseText;
-console.log(fullText); // "Voici le serveur HTTP que j'ai créé..."
 ```
+
+---
 
 ### `resetResponseText()` — Réinitialiser l'accumulateur
 
-Appelé par l'Agent au début de chaque nouveau prompt pour repartir de zéro :
+Remet le texte accumulé à vide. Appelé par l'Agent **avant chaque prompt** :
 
 ```typescript
 handler.resetResponseText();
-console.log(handler.responseText); // ""
+handler.handle(chunk);
+console.log(handler.responseText); // Seulement le nouveau chunk
 ```
 
 ---
@@ -228,7 +191,6 @@ sequenceDiagram
 | Accumulation | `_responseText += text` |
 | Événement | `PROMPT_CHUNK` avec le fragment |
 | Log | Aucun (trop verbeux) |
-| Tracing | Aucun (trop fréquent) |
 
 ---
 
@@ -263,17 +225,12 @@ L'agent décide d'utiliser un outil. C'est ici que commence le tracking du tool 
 sequenceDiagram
     participant ACP as ACP Process
     participant SUH as SessionUpdateHandler
-    participant T as Tracer
     participant A as Agent (via emitEvent)
 
     ACP->>SUH: { sessionUpdate: "tool_call", toolCallId: "tc-42", title: "Run npm test", kind: "execute", rawInput: { command: "npm test" } }
 
     SUH->>SUH: parseToolCommand(rawInput) → "npm test"
     SUH->>SUH: toolCalls.set("tc-42", { title, kind, command })
-
-    SUH->>T: startOperation("agent.tool_call", { tool.call_id, tool.title })
-    SUH->>T: trackSpan("tc-42", span, "tool call")
-    SUH->>T: enterSpan(span)
 
     SUH->>SUH: logger.info("Tool: Run npm test → $ npm test")
     SUH->>A: emitEvent(TOOL_START, { toolCallId, title, kind, command })
@@ -294,7 +251,6 @@ const command = parseToolCommand(rawInput);
 | Action | Détail |
 |--------|--------|
 | Tracking | Ajout dans la `Map<toolCallId, TrackedToolCall>` |
-| Tracing | Nouveau span `agent.tool_call` (enfant du span actif) |
 | Log | `info` avec titre, kind, commande parsée |
 | Événement | `TOOL_START` avec tous les détails |
 
@@ -315,15 +271,13 @@ flowchart TD
     STATUS -->|"completed"| DONE["Complétion ✅"]
     STATUS -->|"failed"| FAIL["Échec ❌"]
 
-    PROG --> LOG1["logger.info + span.addEvent"]
+    PROG --> LOG1["logger.info"]
     PROG --> EMIT1["emitEvent(TOOL_UPDATE)"]
 
     DONE --> LOG2["logger.info"]
-    DONE --> END_SPAN2["removeTrackedSpan + span.setStatus(OK) + span.end()"]
     DONE --> EMIT2["emitEvent(TOOL_UPDATE + TOOL_COMPLETE)"]
 
     FAIL --> LOG3["logger.info"]
-    FAIL --> END_SPAN3["removeTrackedSpan + span.setStatus(ERROR) + span.end()"]
     FAIL --> EMIT3["emitEvent(TOOL_UPDATE + TOOL_FAILED)"]
 
     style DONE fill:#10b981,stroke:#059669,color:#fff
@@ -344,15 +298,11 @@ const exitCode = parseExitCode(rawOutput);
 // → 0
 ```
 
-!!! info "Ordre important : Log avant Tracing"
-    Le log est émis **avant** la fermeture du span. Cela garantit que la ligne de log
-    porte encore le `SpanId` du tool call (via le mixin Pino), et non celui du prompt parent.
-
-| Status | Actions Tracing | Événements émis |
-|--------|----------------|-----------------|
-| `in_progress` | `span.addEvent("tool.update")` | `TOOL_UPDATE` |
-| `completed` | `removeTrackedSpan` + `leaveSpan` + `span.end()` (OK) | `TOOL_UPDATE` + `TOOL_COMPLETE` |
-| `failed` | `removeTrackedSpan` + `leaveSpan` + `span.end()` (ERROR) | `TOOL_UPDATE` + `TOOL_FAILED` |
+| Status | Événements émis |
+|--------|-----------------|
+| `in_progress` | `TOOL_UPDATE` |
+| `completed` | `TOOL_UPDATE` + `TOOL_COMPLETE` |
+| `failed` | `TOOL_UPDATE` + `TOOL_FAILED` |
 
 ---
 
@@ -392,7 +342,6 @@ const percent = Math.round((used / size) * 100);
 | Action | Détail |
 |--------|--------|
 | Calcul | Pourcentage d'utilisation du contexte |
-| Tracing | `recordEvent("active", "usage.update", attrs)` |
 | Log | `info` avec used, size, percent, cost |
 | Événement | `USAGE_UPDATE` avec toutes les métriques calculées |
 
@@ -473,18 +422,18 @@ stateDiagram-v2
     Failed --> [*]
 
     note right of Tracked
-        Span démarré + entré
-        dans la spanStack
+        Tool call enregistré
+        dans la Map
     end note
 
     note right of Completed
-        Span terminé (OK)
-        Retiré de la spanStack
+        Tool call retiré
+        de la Map
     end note
 
     note right of Failed
-        Span terminé (ERROR)
-        Retiré de la spanStack
+        Tool call retiré
+        de la Map
     end note
 ```
 
@@ -546,67 +495,6 @@ parseExitCode({ content: "no marker here" });
 
 ---
 
-## Tracing des tool calls
-
-Le SessionUpdateHandler gère 4 opérations de tracing pour les tool calls :
-
-### `traceToolCallStart`
-
-Démarre un span `agent.tool_call` comme enfant du span actif et le tracke par `toolCallId` :
-
-```mermaid
-sequenceDiagram
-    participant SUH as SessionUpdateHandler
-    participant T as Tracer
-
-    SUH->>T: startOperation("agent.tool_call", attrs, "active")
-    T-->>SUH: span
-    SUH->>T: trackSpan(toolCallId, span, "tool call")
-    SUH->>T: enterSpan(span)
-    Note over T: Les logs portent maintenant<br/>le SpanId du tool call
-```
-
-### `traceToolCallUpdate`
-
-Ajoute un événement au span du tool call en cours :
-
-```typescript
-// No-op si le span n'existe pas ou n'enregistre plus
-const span = tracer.getTrackedSpan(toolCallId);
-if (span?.isRecording()) {
-  span.addEvent("tool.update", { status, output, exit_code });
-}
-```
-
-### `traceToolCallEnd`
-
-Termine le span du tool call avec le bon statut :
-
-```typescript
-const span = tracer.removeTrackedSpan(toolCallId);  // retire du tracking
-span.setAttribute("tool.status", status);
-span.setAttribute("tool.exit_code", exitCode);
-span.setStatus(failed ? ERROR : OK);
-tracer.leaveSpan(span);  // retire de la spanStack
-span.end();
-```
-
-### `traceUsageUpdate`
-
-Enregistre un événement d'usage sur le span actif (sans créer de nouveau span) :
-
-```typescript
-tracer.recordEvent("active", "usage.update", {
-  "usage.context_used": used,
-  "usage.context_size": size,
-  "usage.context_percent": percent,
-  "usage.cost_amount": cost?.amount,
-  "usage.cost_currency": cost?.currency,
-});
-```
-
----
-
 ## Diagramme de séquence complet
 
 Voici un prompt complet vu du point de vue du SessionUpdateHandler :
@@ -615,7 +503,6 @@ Voici un prompt complet vu du point de vue du SessionUpdateHandler :
 sequenceDiagram
     participant ACP as ACP Process
     participant SUH as SessionUpdateHandler
-    participant T as Tracer
     participant L as Logger
     participant A as Agent Events
 
@@ -626,25 +513,19 @@ sequenceDiagram
     SUH->>A: PROMPT_CHUNK
 
     ACP->>SUH: tool_call (tc-1, "Run ls -la", execute)
-    SUH->>T: startOperation("agent.tool_call")
-    SUH->>T: trackSpan("tc-1", span)
-    SUH->>T: enterSpan(span)
+    SUH->>SUH: toolCalls.set("tc-1", { title, kind })
     SUH->>L: info("Tool: Run ls -la → $ ls -la")
     SUH->>A: TOOL_START
 
     ACP->>SUH: tool_call_update (tc-1, in_progress, output)
     SUH->>L: info("Tool update: Run ls -la → in_progress")
-    SUH->>T: span.addEvent("tool.update")
     SUH->>A: TOOL_UPDATE
 
     ACP->>SUH: tool_call_update (tc-1, completed, exit 0)
     SUH->>L: info("Tool update: Run ls -la → completed (exit 0)")
-    SUH->>T: removeTrackedSpan("tc-1")
-    SUH->>T: span.setStatus(OK), span.end()
     SUH->>A: TOOL_UPDATE + TOOL_COMPLETE
 
     ACP->>SUH: usage_update (used: 5000, size: 200000)
-    SUH->>T: recordEvent("usage.update")
     SUH->>L: info("Usage: 3% context")
     SUH->>A: USAGE_UPDATE
 
@@ -668,16 +549,13 @@ graph TD
     SUH["SessionUpdateHandler"]
 
     L["pino.Logger<br/><em>Logging structuré</em>"]
-    T["Tracer<br/><em>Spans OpenTelemetry</em>"]
     E["EmitEventFn<br/><em>Callback d'événements</em>"]
 
     L -->|injecté| SUH
-    T -->|injecté| SUH
     E -->|injecté| SUH
 
     style SUH fill:#8b5cf6,stroke:#7c3aed,color:#fff
     style L fill:#3b82f6,stroke:#2563eb,color:#fff
-    style T fill:#f59e0b,stroke:#d97706
     style E fill:#10b981,stroke:#059669,color:#fff
 ```
 
@@ -733,13 +611,11 @@ Le SessionUpdateHandler peut être utilisé indépendamment pour les tests :
 
 ```typescript
 import { AgentSessionUpdateHandler } from "./classes/agent/agent-session-update-handler.ts";
-import { Tracer } from "./classes/tracer/tracer.ts";
 import { createSilentLogger } from "./logger/create-logger.ts";
 import { AgentEvent } from "./enums/agent-event.enum.ts";
 
 // Créer les dépendances
 const logger = createSilentLogger();
-const tracer = new Tracer({ enabled: false });
 
 const events: Array<{ event: AgentEvent; payload: unknown }> = [];
 const emitEvent = (event: AgentEvent, payload: unknown) => {
@@ -747,7 +623,7 @@ const emitEvent = (event: AgentEvent, payload: unknown) => {
 };
 
 // Créer le handler
-const handler = new AgentSessionUpdateHandler(logger, tracer, emitEvent);
+const handler = new AgentSessionUpdateHandler(logger, emitEvent);
 
 // Simuler un flux d'updates
 handler.handle({
@@ -774,11 +650,10 @@ console.log(events[0].event);      // "prompt:chunk"
 |---------|-------------|
 | **Entrée** | `SessionUpdate` du protocole ACP |
 | **Routage** | Switch exhaustif via `SessionUpdateType` enum |
-| **Sorties** | Logs (Pino) + Traces (OTel) + Events (callback) |
+| **Sorties** | Logs (Pino) + Events (callback) |
 | **État** | `responseText` accumulé + `toolCalls` map |
 | **Parsing** | `parseToolCommand`, `parseToolOutput`, `parseExitCode` |
-| **Tracing** | Start/update/end des spans tool call + usage events |
-| **Dépendances** | Logger, Tracer, EmitEventFn — toutes injectées |
+| **Dépendances** | Logger, EmitEventFn — toutes injectées |
 
 ---
 
@@ -786,9 +661,8 @@ console.log(events[0].event);      // "prompt:chunk"
 
 - [**Architecture**](../architecture/overview.md) — Vue d'ensemble du système
 - [**Agent**](agent.md) — L'orchestrateur qui crée le SessionUpdateHandler
-- [**Tracer**](tracer.md) — Utilisé pour les spans des tool calls
 - [**Logger**](logger.md) — Utilisé pour le logging structuré
 - [**Agent Client Protocol**](acp.md) — Source des `SessionUpdate`
-- [**ACPClientFactory**](acp-client-factory.md) — L'autre consommateur du Tracer et Logger
+- [**ACPClientFactory**](acp-client-factory.md) — L'autre consommateur du Logger
 - [**Événements typés**](../concepts/events.md) — Détail des événements émis
 - [**Flux & Séquences**](../architecture/sequences.md) — Diagrammes montrant le handler en action

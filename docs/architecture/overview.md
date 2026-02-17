@@ -11,7 +11,7 @@ Stark suit trois principes architecturaux fondamentaux :
 
 1. **Séparation des responsabilités** — Chaque brique a un rôle unique et bien défini
 2. **Composition par injection** — Les dépendances sont injectées, jamais instanciées en interne
-3. **Observabilité native** — Chaque action est loguée, tracée et émise comme événement
+3. **Observabilité native** — Chaque action est loguée et émise comme événement
 
 Le résultat : un système où chaque composant peut être testé, remplacé ou étendu indépendamment.
 
@@ -44,7 +44,6 @@ graph TB
     subgraph "🔧 Infrastructure"
         direction LR
         TM[TerminalManager<br/><em>Processus enfants</em>]
-        TRACER[Tracer<br/><em>OpenTelemetry</em>]
         LOGGER[Logger<br/><em>Pino multi-stream</em>]
     end
 
@@ -55,30 +54,26 @@ graph TB
 
     subgraph "📊 Backends"
         direction LR
-        SEQ[(Seq<br/><em>Logs + Traces</em>)]
+        SEQ[(Seq<br/><em>Logs</em>)]
         CONSOLE[Console<br/><em>pino-pretty</em>]
         FILE[Fichier<br/><em>NDJSON</em>]
     end
 
     USER -->|prompt / injectContext| AGENT
     AGENT --> TM
-    AGENT --> TRACER
     AGENT --> LOGGER
     ACF --> CONN
     CONN <-->|stdio| PROC
     ACF --> TM
 
-    TRACER -->|OTLP proto| SEQ
     LOGGER -->|pino-seq| SEQ
     LOGGER -->|stream| CONSOLE
     LOGGER -->|stream| FILE
 
     SUH -->|events| AGENT
     SUH --> LOGGER
-    SUH --> TRACER
 
     style AGENT fill:#7c3aed,stroke:#5b21b6,color:#fff
-    style TRACER fill:#f59e0b,stroke:#d97706,color:#000
     style LOGGER fill:#3b82f6,stroke:#2563eb,color:#fff
     style SEQ fill:#10b981,stroke:#059669,color:#fff
     style PROC fill:#ef4444,stroke:#dc2626,color:#fff
@@ -89,9 +84,9 @@ graph TB
 
 ---
 
-## Les 8 briques
+## Les 7 briques
 
-Le système se décompose en **8 composants** répartis en 3 couches :
+Le système se décompose en **7 composants** répartis en 3 couches :
 
 ### Couche Orchestration
 
@@ -104,22 +99,21 @@ Le système se décompose en **8 composants** répartis en 3 couches :
 | Composant | Fichier | Rôle |
 |-----------|---------|------|
 | [**AgentContextManager**](../components/context-manager.md) | `classes/agent/agent-context-manager.ts` | File FIFO pure (aucune dépendance) qui gère l'injection de contexte entre les prompts. |
-| [**SessionUpdateHandler**](../components/session-update-handler.md) | `classes/agent/agent-session-update-handler.ts` | Routeur qui dispatche chaque `SessionUpdate` ACP vers le bon handler (logging, tracing, événements). |
+| [**SessionUpdateHandler**](../components/session-update-handler.md) | `classes/agent/agent-session-update-handler.ts` | Routeur qui dispatche chaque `SessionUpdate` ACP vers le bon handler (logging, événements). |
 | [**ACPClientFactory**](../components/acp-client-factory.md) | `classes/agent/agent-acp-client-factory.ts` | Fabrique du client ACP : implémente les callbacks de permissions, filesystem et terminal. |
 
 ### Couche Infrastructure
 
 | Composant | Fichier | Rôle |
 |-----------|---------|------|
-| [**Tracer**](../components/tracer.md) | `classes/tracer/tracer.ts` | Wrapper générique OpenTelemetry. Gère la hiérarchie root → active → operation spans. |
-| [**Logger**](../components/logger.md) | `logger/create-logger.ts` | Fabrique de loggers Pino multi-transport (console, JSON, Seq) avec corrélation trace. |
+| [**Logger**](../components/logger.md) | `logger/create-logger.ts` | Fabrique de loggers Pino multi-transport (console, JSON, Seq). |
 | [**TerminalManager**](../components/terminal-manager.md) | `classes/terminal-manager/terminal-manager.ts` | Gestionnaire de processus enfants : spawn, output, exit, kill. |
 
 ---
 
 ## Flux de données
 
-Le système présente **trois flux de données** distincts :
+Le système présente **deux flux de données** distincts :
 
 ### 1. Flux de commande (descendant)
 
@@ -144,52 +138,10 @@ flowchart LR
     D -->|"onSessionUpdate()"| SUH[SessionUpdateHandler]
     SUH -->|"emitEvent()"| A[Agent EventEmitter]
     SUH -->|"logger.info()"| L[Logger]
-    SUH -->|"tracer.*()"| T[Tracer]
 
     style E fill:#ef4444,stroke:#dc2626,color:#fff
     style A fill:#7c3aed,stroke:#5b21b6,color:#fff
     style L fill:#3b82f6,stroke:#2563eb,color:#fff
-    style T fill:#f59e0b,stroke:#d97706
-```
-
-### 3. Flux d'observabilité (transversal)
-
-```mermaid
-flowchart LR
-    subgraph Sources
-        AG[Agent]
-        SUH[SessionUpdateHandler]
-        ACF[ACPClientFactory]
-    end
-
-    subgraph "Tracer (OTel)"
-        RS[Root Span]
-        AS[Active Span]
-        OS[Operation Spans]
-        RS --> AS --> OS
-    end
-
-    subgraph "Logger (Pino)"
-        MX[Mixin TraceContext]
-        MS[Multi-stream]
-    end
-
-    subgraph Backends
-        SEQ[(Seq)]
-    end
-
-    AG --> RS
-    SUH --> OS
-    ACF --> OS
-
-    AG --> MX
-    SUH --> MS
-    MX --> MS
-
-    OS -->|OTLP| SEQ
-    MS -->|pino-seq| SEQ
-
-    style SEQ fill:#10b981,stroke:#059669,color:#fff
 ```
 
 ---
@@ -201,15 +153,13 @@ L'`Agent` est le seul point d'assemblage (composition root) :
 
 ```mermaid
 graph TD
-    AGENT[Agent] -->|crée| TRACER[Tracer]
-    AGENT -->|crée| LOGGER[Logger]
+    AGENT[Agent] -->|crée| LOGGER[Logger]
     AGENT -->|crée| CTX[ContextManager]
     AGENT -->|crée| TM[TerminalManager]
 
-    AGENT -->|injecte logger, tracer, emitEvent| SUH[SessionUpdateHandler]
-    AGENT -->|injecte logger, tracer, emitEvent, TM, config| ACF[ACPClientFactory]
+    AGENT -->|injecte logger, emitEvent| SUH[SessionUpdateHandler]
+    AGENT -->|injecte logger, emitEvent, TM, config| ACF[ACPClientFactory]
 
-    TRACER -.->|"getTraceContext()"| LOGGER
     ACF -->|utilise| TM
 
     style AGENT fill:#7c3aed,stroke:#5b21b6,color:#fff
@@ -218,7 +168,7 @@ graph TD
     class SUH,ACF injected
 
     classDef infra fill:#1e293b,stroke:#475569,color:#fff
-    class TRACER,LOGGER,TM,CTX infra
+    class LOGGER,TM,CTX infra
 ```
 
 !!! info "Composition Root"
@@ -266,13 +216,7 @@ Chaque composant a un **périmètre strict** :
 | **SessionUpdateHandler** | Router des updates vers les bons handlers | Comment spawner un processus |
 | **ACPClientFactory** | Implémenter les callbacks ACP | Le cycle de vie de l'agent |
 | **TerminalManager** | Spawner et gérer des processus | Le protocole ACP |
-| **Tracer** | Gérer des spans OpenTelemetry | Le domaine métier |
 | **Logger** | Écrire des logs structurés | Ce qu'est un agent |
-
-!!! tip "Principe Open/Closed"
-    Le `Tracer` est volontairement générique (domain-agnostic). Pour tracer un nouveau concept
-    métier, on crée des **fonctions helper externes** qui composent l'API du Tracer —
-    sans jamais modifier la classe elle-même.
 
 ---
 

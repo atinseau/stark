@@ -50,7 +50,6 @@ nav:
   - Briques du système:
       - Agent Client Protocol (ACP): components/acp.md
       - Agent: components/agent.md
-      - Tracer (OpenTelemetry): components/tracer.md
       - Logger (Pino): components/logger.md
       - TerminalManager: components/terminal-manager.md
       - AgentContextManager: components/context-manager.md

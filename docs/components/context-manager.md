@@ -20,7 +20,7 @@ prépendées au prochain prompt ou envoyées comme follow-up.
 | 🔗 **Fusion** | Concatène les instructions en un seul bloc avec séparateurs |
 | 📝 **Enrichissement de prompt** | Prépend le contexte accumulé au prochain prompt |
 | 🚰 **Drain** | Vide la file et retourne le contenu fusionné |
-| 🧹 **Zéro dépendance** | Aucune dépendance sur Logger, Tracer ou Agent |
+| 🧹 **Zéro dépendance** | Aucune dépendance sur Logger ou Agent |
 
 ```mermaid
 flowchart LR
@@ -43,7 +43,7 @@ flowchart LR
 ```
 
 !!! tip "Pure logique"
-    L'AgentContextManager est une classe **pure** : pas de logging, pas de tracing,
+    L'AgentContextManager est une classe **pure** : pas de logging,
     pas d'événements, pas d'effets de bord. Elle ne gère que des données.
     C'est l'`Agent` qui décide **quand** drainer la file en fonction de son status.
 
@@ -356,11 +356,10 @@ L'AgentContextManager est un exemple parfait du pattern **Pure Logic Class** :
 | **Effets de bord** | Aucun (mutation interne uniquement) |
 | **I/O** | Aucun |
 | **Logging** | Aucun |
-| **Tracing** | Aucun |
 | **Événements** | Aucun |
 | **Testabilité** | Triviale — pas de mocks nécessaires |
 
-Cette séparation est **intentionnelle**. Le logging, tracing et l'émission d'événements
+Cette séparation est **intentionnelle**. Le logging et l'émission d'événements
 liés à l'injection de contexte sont gérés par l'`Agent`, qui est le seul à savoir
 quand et comment ces opérations doivent être observées :
 
@@ -368,7 +367,6 @@ quand et comment ces opérations doivent être observées :
 flowchart LR
     subgraph "Agent (orchestrateur)"
         LOG["logger.info('Context injected')"]
-        TRACE["tracer.recordEvent('context.injected')"]
         EMIT["emitEvent(CONTEXT_INJECTED)"]
     end
 
@@ -379,11 +377,9 @@ flowchart LR
     end
 
     LOG -.-> INJ
-    TRACE -.-> INJ
     EMIT -.-> INJ
 
     style LOG fill:#3b82f6,stroke:#2563eb,color:#fff
-    style TRACE fill:#f59e0b,stroke:#d97706
     style EMIT fill:#10b981,stroke:#059669,color:#fff
     style INJ fill:#8b5cf6,stroke:#7c3aed,color:#fff
     style BUILD fill:#8b5cf6,stroke:#7c3aed,color:#fff
@@ -393,10 +389,10 @@ flowchart LR
 !!! tip "Pourquoi ce design ?"
     En séparant la logique pure de l'observabilité, on obtient :
 
-    - **Tests unitaires simples** — pas besoin de mocker un logger ou un tracer
+    - **Tests unitaires simples** — pas besoin de mocker un logger
     - **Réutilisabilité** — le ContextManager peut être utilisé dans n'importe quel contexte
     - **Responsabilité unique** — chaque classe fait une seule chose bien
-    - **Flexibilité** — l'Agent choisit quoi logger/tracer/émettre selon le contexte
+    - **Flexibilité** — l'Agent choisit quoi logger/émettre selon le contexte
 
 ---
 

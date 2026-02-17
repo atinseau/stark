@@ -8,7 +8,7 @@ hide:
 > **Stark** est un système d'agents autonomes construit sur l'**Agent Client Protocol (ACP)**.
 > Il orchestre des processus d'IA capables d'exécuter des commandes, manipuler des fichiers,
 > et raisonner sur des tâches complexes — le tout avec une observabilité complète via
-> **OpenTelemetry** et **Pino**.
+> **Pino**.
 
 ---
 
@@ -27,11 +27,10 @@ hide:
 |--------|-------------|
 | [Agent Client Protocol (ACP)](components/acp.md) | Le protocole de communication entre le client et l'agent IA |
 | [Agent](components/agent.md) | La classe principale — orchestrateur de toutes les briques |
-| [Tracer](components/tracer.md) | Tracing distribué via OpenTelemetry vers Seq |
 | [Logger](components/logger.md) | Logging structuré multi-transport avec Pino |
 | [TerminalManager](components/terminal-manager.md) | Gestion du cycle de vie des processus terminaux |
 | [AgentContextManager](components/context-manager.md) | File d'attente d'injection de contexte |
-| [SessionUpdateHandler](components/session-update-handler.md) | Routeur d'événements ACP → logs, traces, events |
+| [SessionUpdateHandler](components/session-update-handler.md) | Routeur d'événements ACP → logs, events |
 | [ACPClientFactory](components/acp-client-factory.md) | Construction du client ACP (permissions, FS, terminal) |
 
 ### 💡 Concepts
@@ -59,8 +58,7 @@ hide:
 | **Pino** | Logging structuré haute performance |
 | **pino-pretty** | Affichage colorisé en console |
 | **pino-seq** | Streaming des logs vers Seq |
-| **OpenTelemetry** | Tracing distribué (spans, traces) |
-| **Seq** | Interface web de visualisation des logs et traces |
+| **Seq** | Interface web de visualisation des logs |
 | **Faker.js** | Génération de noms d'agents mémorables |
 | **Docker Compose** | Orchestration des services (Seq, MkDocs) |
 
@@ -75,7 +73,6 @@ graph TB
         A --> SUH[SessionUpdateHandler]
         A --> ACF[ACPClientFactory]
         A --> TM[TerminalManager]
-        A --> T[Tracer]
         A --> L[Logger]
     end
 
@@ -85,14 +82,12 @@ graph TB
     end
 
     subgraph "📊 Observabilité"
-        T -->|OTLP| SEQ[Seq]
-        L -->|pino-seq| SEQ
+        L -->|pino-seq| SEQ[Seq]
         L -->|pino-pretty| CONSOLE[Console]
         L -->|NDJSON| FILE[Fichier JSON]
     end
 
     style A fill:#7c3aed,stroke:#5b21b6,color:#fff
-    style T fill:#f59e0b,stroke:#d97706,color:#000
     style L fill:#3b82f6,stroke:#2563eb,color:#fff
     style SEQ fill:#10b981,stroke:#059669,color:#fff
 ```
@@ -112,7 +107,7 @@ docker compose up -d
 bun run start "Crée un fichier hello.ts"
 
 # 4. Visualiser
-#    Logs & Traces → http://localhost:8082
+#    Logs → http://localhost:8082
 #    Documentation → http://localhost:8083
 ```
 
