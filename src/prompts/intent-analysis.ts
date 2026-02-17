@@ -13,6 +13,7 @@ Classify user messages into one of these intents:
 - **context_injection**: User wants to provide additional context to running agents.
 - **cancel**: User wants to stop current execution.
 - **approve_agent**: User is approving or denying a pending agent action. ONLY use when pending approval requests exist in pool state. Covers explicit ("authorize Agent-X") and implicit ("yes", "ok", "go ahead", "continue") approvals, plus denials ("no", "deny", "reject").
+- **replan**: User wants to change the current plan or ask the system to re-evaluate its approach. Examples: "change the plan", "try a different approach", "replan", "the current strategy isn't working".
 - **unknown**: Intent cannot be determined.
 
 ## approve_agent Rules
@@ -75,15 +76,27 @@ Classify user messages into one of these intents:
   "reasoning": "User providing additional constraint to active agents."
 }
 
+### Example 6: Replan
+**Message**: "This approach isn't working, try a different strategy"
+**Pool state**: executing, 3 active agents
+**Response**:
+{
+  "intent": "replan",
+  "confidence": 0.85,
+  "parameters": { "reason": "User wants to change the current execution strategy" },
+  "reasoning": "User explicitly requesting a change in approach while execution is active."
+}
+
 ## JSON Output
 {
-  "intent": "new_task" | "notification_preference" | "status_query" | "context_injection" | "cancel" | "approve_agent" | "unknown",
+  "intent": "new_task" | "notification_preference" | "status_query" | "context_injection" | "cancel" | "approve_agent" | "replan" | "unknown",
   "confidence": <0.0-1.0>,
   "parameters": {
     // notification_preference: { "enabled": bool, "minSignificance": 0.0-1.0 }
     // context_injection: { "instructions": "<text>", "targetAgent": "<name|all>" }
     // new_task: { "task": "<extracted task>" }
     // approve_agent: { "approved": bool, "targetAgent": "<name>", "scope": "all"|"agent" }
+    // replan: { "reason": "<why replan>" }
     // status_query/cancel: {}
   },
   "reasoning": "<brief explanation>"

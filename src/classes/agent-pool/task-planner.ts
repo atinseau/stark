@@ -4,10 +4,13 @@ import { ExecutionStrategy } from "../../enums/execution-strategy.enum.ts";
 import { TaskComplexity } from "../../enums/task-complexity.enum.ts";
 import {
 	planningSystemPrompt,
+	replanPrompt,
 	taskAnalysisPrompt,
 } from "../../prompts/index.ts";
 import type {
 	ProjectContext,
+	ReplanDecision,
+	ReplanRequest,
 	SubTask,
 	TaskAnalysis,
 	TaskDependency,
@@ -150,6 +153,80 @@ function validateDependency(data: unknown): TaskDependency | null {
 		from: obj.from as string,
 		to: obj.to as string,
 		type,
+	};
+}
+
+// ── Replan Decision Validator ──────────────────────────────────────────────
+
+/**
+ * Validates that a raw parsed JSON value conforms to the {@link ReplanDecision}
+ * schema expected from the planner LLM during replanning.
+ *
+ * Performs structural type checking and consistency checks:
+ * - `modify` must have non-empty `newSubtasks`
+ * - `continue` and `abort` must have empty `newSubtasks`
+ *
+ * Returns `null` if the data is invalid so the OpenRouter client can retry
+ * with a correction prompt.
+ */
+function validateReplanDecision(data: unknown): ReplanDecision | null {
+	if (data == null || typeof data !== "object") return null;
+
+	const obj = data as Record<string, unknown>;
+
+	// shouldReplan
+	if (typeof obj.shouldReplan !== "boolean") return null;
+
+	// action
+	const validActions = ["continue", "modify", "restart", "abort"];
+	if (typeof obj.action !== "string" || !validActions.includes(obj.action))
+		return null;
+
+	// reasoning
+	if (typeof obj.reasoning !== "string" || obj.reasoning.length === 0)
+		return null;
+
+	// newSubtasks
+	const newSubtasks: SubTask[] = [];
+	if (Array.isArray(obj.newSubtasks)) {
+		for (const raw of obj.newSubtasks) {
+			const subtask = validateSubTask(raw);
+			if (!subtask) return null;
+			newSubtasks.push(subtask);
+		}
+	}
+
+	// newDependencies
+	const newDependencies: TaskDependency[] = [];
+	if (Array.isArray(obj.newDependencies)) {
+		for (const raw of obj.newDependencies) {
+			const dep = validateDependency(raw);
+			if (!dep) return null;
+			newDependencies.push(dep);
+		}
+	}
+
+	// completedWorkSummary
+	const completedWorkSummary =
+		typeof obj.completedWorkSummary === "string"
+			? obj.completedWorkSummary
+			: "";
+
+	// Consistency checks
+	if (obj.action === "modify" && newSubtasks.length === 0) return null;
+	if (
+		(obj.action === "continue" || obj.action === "abort") &&
+		newSubtasks.length > 0
+	)
+		return null;
+
+	return {
+		shouldReplan: obj.shouldReplan,
+		action: obj.action as ReplanDecision["action"],
+		reasoning: obj.reasoning,
+		newSubtasks,
+		newDependencies,
+		completedWorkSummary,
 	};
 }
 
@@ -435,7 +512,150 @@ export class TaskPlanner {
 		return this.buildFallback(task);
 	}
 
+	// ── Public API: Replan ──────────────────────────────────────────────
+
+	/**
+	 * Evaluates whether the current plan should be modified given the
+	 * current execution state and a triggering problem.
+	 *
+	 * Uses the planner LLM conversation to analyze the situation and
+	 * decide on the best course of action. The planner has full context
+	 * about what was originally planned, what has been accomplished,
+	 * and what went wrong.
+	 *
+	 * @param request - The replan request with full execution context.
+	 * @returns A decision on how to proceed.
+	 */
+	async replan(request: ReplanRequest): Promise<ReplanDecision> {
+		// Reset the planner conversation for a fresh analysis
+		this.conversations.reset(ConversationRole.PLANNER);
+
+		const prompt = replanPrompt({
+			originalTask: this.conversations.client.sanitize(request.originalTask),
+			originalAnalysis: request.originalAnalysis,
+			agentStates: request.agentStates,
+			trigger: request.trigger,
+			blockedSubtaskIds: request.blockedSubtaskIds,
+			problemDescription: request.problemDescription,
+		});
+
+		this.logger.info(
+			{
+				trigger: request.trigger,
+				completedCount: request.agentStates.filter((a) => a.completed).length,
+				failedCount: request.agentStates.filter((a) => a.failed).length,
+				blockedCount: request.blockedSubtaskIds.length,
+			},
+			`Evaluating replan (trigger: ${request.trigger})`,
+		);
+
+		try {
+			const decision = await this.conversations.sendJson(
+				ConversationRole.PLANNER,
+				prompt,
+				validateReplanDecision,
+			);
+
+			// Semantic validation for "modify" decisions
+			if (decision.action === "modify") {
+				const errors = this.validateModifyDecision(decision, request);
+				if (errors.length > 0) {
+					this.logger.warn(
+						{ errors },
+						"Replan modify decision has semantic errors — falling back to continue",
+					);
+					return {
+						shouldReplan: false,
+						action: "continue",
+						reasoning: `Replan decision was invalid (${errors.join("; ")}). Continuing with original plan.`,
+						newSubtasks: [],
+						newDependencies: [],
+						completedWorkSummary: "",
+					};
+				}
+			}
+
+			this.logger.info(
+				{
+					action: decision.action,
+					shouldReplan: decision.shouldReplan,
+					newSubtaskCount: decision.newSubtasks.length,
+				},
+				`Replan decision: ${decision.action} — ${decision.reasoning.slice(0, 100)}`,
+			);
+
+			return decision;
+		} catch (error) {
+			this.logger.warn(
+				{ error: toErrorMessage(error) },
+				"Replan evaluation failed — defaulting to continue",
+			);
+
+			return {
+				shouldReplan: false,
+				action: "continue",
+				reasoning: `Replan evaluation failed: ${toErrorMessage(error)}. Continuing with original plan.`,
+				newSubtasks: [],
+				newDependencies: [],
+				completedWorkSummary: "",
+			};
+		}
+	}
+
 	// ── Private ────────────────────────────────────────────────────────
+
+	/**
+	 * Validates that a "modify" decision doesn't re-create already-completed
+	 * subtasks or reference non-existent subtask IDs in dependencies.
+	 */
+	private validateModifyDecision(
+		decision: ReplanDecision,
+		request: ReplanRequest,
+	): string[] {
+		const errors: string[] = [];
+
+		const completedIds = new Set(
+			request.agentStates
+				.filter((a) => a.completed && !a.failed)
+				.map((a) => a.subtaskId),
+		);
+
+		// Check that no new subtask reuses a completed subtask ID
+		for (const subtask of decision.newSubtasks) {
+			if (completedIds.has(subtask.id)) {
+				errors.push(
+					`New subtask "${subtask.id}" reuses a completed subtask ID`,
+				);
+			}
+		}
+
+		// Check dependency validity
+		const allIds = new Set([
+			...completedIds,
+			...decision.newSubtasks.map((s) => s.id),
+		]);
+
+		for (const dep of decision.newDependencies) {
+			if (!allIds.has(dep.from)) {
+				errors.push(`Dependency references unknown subtask "${dep.from}"`);
+			}
+			if (!allIds.has(dep.to)) {
+				errors.push(`Dependency references unknown subtask "${dep.to}"`);
+			}
+			if (dep.from === dep.to) {
+				errors.push(`Subtask "${dep.from}" depends on itself`);
+			}
+		}
+
+		// Check that new subtasks don't have empty prompts
+		for (const subtask of decision.newSubtasks) {
+			if (!subtask.prompt || subtask.prompt.trim().length === 0) {
+				errors.push(`Subtask "${subtask.id}" has an empty prompt`);
+			}
+		}
+
+		return errors;
+	}
 
 	/**
 	 * Builds a correction prompt that includes the original analysis

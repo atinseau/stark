@@ -106,6 +106,25 @@ export class SubtaskTimeoutError extends Error {
 	}
 }
 
+// ── Replan Restart Error ───────────────────────────────────────────────────
+
+/**
+ * Thrown when a replan decision requires restarting the entire execution.
+ *
+ * This is a flow-control error caught by `execute()` to trigger a full
+ * restart of the execution pipeline. It is NOT a "real" error — it signals
+ * that the planner decided the current plan is unsalvageable and a fresh
+ * start is needed.
+ */
+export class ReplanRestartError extends Error {
+	readonly isReplanRestart = true;
+
+	constructor(readonly decision: { readonly reasoning: string }) {
+		super(`Replan requires restart: ${decision.reasoning}`);
+		this.name = "ReplanRestartError";
+	}
+}
+
 /**
  * Wrap any thrown value into a proper `Error` instance.
  *

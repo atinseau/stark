@@ -71,4 +71,23 @@ export enum PoolEvent {
 	 * blocks until resolved — other agents continue unaffected.
 	 */
 	APPROVE_REQUEST = "pool:approve-request",
+
+	/**
+	 * A replanning evaluation has started.
+	 *
+	 * Emitted when the pool detects a condition that warrants re-evaluating
+	 * the current execution plan (e.g. subtask failure after retries,
+	 * deadlock, cascading failures). The payload includes the trigger
+	 * and a human-readable problem description.
+	 */
+	REPLAN_START = "pool:replan-start",
+
+	/**
+	 * A replanning evaluation has completed with a decision.
+	 *
+	 * Emitted after the planner LLM has analyzed the situation and
+	 * decided how to proceed (continue, modify, restart, or abort).
+	 * The payload includes the full {@link ReplanDecision}.
+	 */
+	REPLAN_COMPLETE = "pool:replan-complete",
 }

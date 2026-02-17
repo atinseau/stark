@@ -252,6 +252,101 @@ export interface TaskDependency {
 	readonly type: "blocking" | "informational";
 }
 
+// ── Replanning Types ───────────────────────────────────────────────────────
+
+/**
+ * Trigger conditions that can initiate a replanning evaluation.
+ */
+export enum ReplanTrigger {
+	/** A subtask failed after exhausting all retries. */
+	SUBTASK_FAILURE = "subtask_failure",
+
+	/** A deadlock was detected in the dependency graph. */
+	DEADLOCK = "deadlock",
+
+	/** An agent reported a fundamental blocker (framework mismatch, missing capability). */
+	AGENT_BLOCKER = "agent_blocker",
+
+	/** Multiple subtasks failed, suggesting systemic issues. */
+	CASCADING_FAILURES = "cascading_failures",
+
+	/** Manual replan requested by the user. */
+	USER_REQUESTED = "user_requested",
+}
+
+/**
+ * Request for replanning, containing the context needed for the planner
+ * to make an informed decision about how to proceed.
+ */
+export interface ReplanRequest {
+	/** What triggered the replan evaluation. */
+	readonly trigger: ReplanTrigger;
+
+	/** The original task description. */
+	readonly originalTask: string;
+
+	/** The original plan that was being executed. */
+	readonly originalAnalysis: TaskAnalysis;
+
+	/** Current state of all agents (completed, failed, in-progress). */
+	readonly agentStates: ReadonlyArray<{
+		readonly subtaskId: string;
+		readonly agentName: string;
+		readonly role: string;
+		readonly completed: boolean;
+		readonly failed: boolean;
+		readonly error: string | null;
+		/** Summary of what was accomplished before failure/completion. */
+		readonly accomplishedSummary: string;
+		/** Files written by this agent. */
+		readonly filesWritten: readonly string[];
+	}>;
+
+	/** Subtask IDs that are blocked and cannot proceed. */
+	readonly blockedSubtaskIds: readonly string[];
+
+	/** Human-readable description of the problem that triggered replanning. */
+	readonly problemDescription: string;
+}
+
+/**
+ * The planner's decision on how to proceed after evaluating the replan request.
+ */
+export interface ReplanDecision {
+	/** Whether the plan should be modified. */
+	readonly shouldReplan: boolean;
+
+	/**
+	 * The chosen strategy for the replan.
+	 * - `"continue"` — Keep going with the current plan despite issues.
+	 * - `"modify"` — Adjust the plan: add, remove, or change subtasks.
+	 * - `"restart"` — Abandon current progress and restart from scratch.
+	 * - `"abort"` — Stop execution entirely, the task cannot be completed.
+	 */
+	readonly action: "continue" | "modify" | "restart" | "abort";
+
+	/** Human-readable reasoning for the decision. */
+	readonly reasoning: string;
+
+	/**
+	 * If action is "modify": the new subtasks to execute.
+	 * These replace the remaining (non-completed) subtasks in the original plan.
+	 * Already-completed subtasks are NOT re-executed.
+	 */
+	readonly newSubtasks: SubTask[];
+
+	/**
+	 * If action is "modify": updated dependency graph for the new subtasks.
+	 */
+	readonly newDependencies: TaskDependency[];
+
+	/**
+	 * Context that should be injected into new agents, summarizing
+	 * what was already accomplished by the completed subtasks.
+	 */
+	readonly completedWorkSummary: string;
+}
+
 // ── Significance Context Types ─────────────────────────────────────────────
 
 /**
@@ -832,6 +927,24 @@ export interface AgentPoolConfig {
 	readonly retry?: SubtaskRetryConfig;
 
 	/**
+	 * Whether adaptive replanning is enabled.
+	 * When enabled, the pool will consult the planner when subtasks fail
+	 * after retries, when deadlocks are detected, or when cascading
+	 * failures suggest the plan is unviable.
+	 *
+	 * Default: true
+	 */
+	readonly enableReplanning?: boolean;
+
+	/**
+	 * Maximum number of replanning attempts per execution.
+	 * Prevents infinite replan loops.
+	 *
+	 * Default: 2
+	 */
+	readonly maxReplanAttempts?: number;
+
+	/**
 	 * Optional factory function for creating agents.
 	 *
 	 * When provided, the pool uses this factory instead of directly
@@ -1093,6 +1206,17 @@ export interface PoolDestroyedEvent extends BasePoolEvent {
 	readonly event: PoolEvent.DESTROYED;
 }
 
+export interface ReplanStartEvent extends BasePoolEvent {
+	readonly event: PoolEvent.REPLAN_START;
+	readonly trigger: ReplanTrigger;
+	readonly problemDescription: string;
+}
+
+export interface ReplanCompleteEvent extends BasePoolEvent {
+	readonly event: PoolEvent.REPLAN_COMPLETE;
+	readonly decision: ReplanDecision;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -1158,4 +1282,6 @@ export interface PoolEventMap {
 	[PoolEvent.ERROR]: PoolErrorEvent;
 	[PoolEvent.DESTROYED]: PoolDestroyedEvent;
 	[PoolEvent.APPROVE_REQUEST]: ApproveRequestPoolEvent;
+	[PoolEvent.REPLAN_START]: ReplanStartEvent;
+	[PoolEvent.REPLAN_COMPLETE]: ReplanCompleteEvent;
 }

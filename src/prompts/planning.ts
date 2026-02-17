@@ -207,3 +207,77 @@ Only use "multi" if decomposition provides genuine, meaningful benefit. Single a
 export const taskAnalysisPrompt = Handlebars.compile(TASK_ANALYSIS_SOURCE, {
 	noEscape: true,
 });
+
+// ── Planning: Replan Prompt ────────────────────────────────────────────────
+
+const REPLAN_PROMPT_SOURCE = `The current execution plan has encountered a problem and needs your evaluation.
+
+## Original Task
+<task>
+{{originalTask}}
+</task>
+
+## Original Plan
+- **Strategy**: {{originalAnalysis.strategy}}
+- **Complexity**: {{originalAnalysis.complexity}}
+- **Subtasks**: {{originalAnalysis.subtasks.length}}
+- **Reasoning**: {{originalAnalysis.reasoning}}
+
+### Original Subtasks
+{{#each originalAnalysis.subtasks}}
+- **{{this.id}}** ({{this.role}}): {{truncate this.prompt 150}}
+  - Dependencies: {{#if this.dependencies.length}}{{#each this.dependencies}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{else}}none{{/if}}
+{{/each}}
+
+## Current Execution State
+{{#each agentStates}}
+### {{this.agentName}} ({{this.role}}) — subtask: {{this.subtaskId}}
+- **Status**: {{#if this.completed}}✅ Completed{{else if this.failed}}❌ Failed: {{this.error}}{{else}}⚙️ In progress{{/if}}
+{{#if this.accomplishedSummary}}- **Accomplished**: {{this.accomplishedSummary}}{{/if}}
+{{#if this.filesWritten.length}}- **Files written**: {{#each this.filesWritten}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}{{/if}}
+
+{{/each}}
+
+## Problem
+**Trigger**: {{trigger}}
+**Blocked subtasks**: {{#each blockedSubtaskIds}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+
+{{problemDescription}}
+
+## Your Decision
+
+Evaluate the situation and decide how to proceed. Your options:
+
+1. **continue** — The issue is minor. Keep the current plan and let remaining subtasks proceed.
+2. **modify** — Adjust the plan. Provide NEW subtasks that replace the remaining (non-completed) work. Already-completed subtasks are preserved — do NOT re-do them. New subtask prompts must reference what was already accomplished.
+3. **restart** — The situation is too broken to salvage. Abandon all progress and start fresh.
+4. **abort** — The task fundamentally cannot be completed (e.g., impossible requirements).
+
+## Important Rules
+- Prefer **continue** for minor, recoverable issues.
+- Prefer **modify** when specific subtasks failed but other work can be preserved.
+- Use **restart** only if the majority of work is invalidated.
+- Use **abort** only if the task is genuinely impossible.
+- When modifying: new subtask prompts MUST reference completed work. Example: "The API has already been implemented in src/routes/users.ts. Write tests for it."
+- When modifying: do NOT change subtask IDs of already-completed subtasks.
+- Include \`completedWorkSummary\` that describes what was already done — this will be injected into new agents.
+
+## JSON Output
+{
+  "shouldReplan": true | false,
+  "action": "continue" | "modify" | "restart" | "abort",
+  "reasoning": "<why this decision>",
+  "newSubtasks": [
+    { "id": "...", "prompt": "...", "role": "...", "dependencies": [], "priority": 1 }
+  ],
+  "newDependencies": [
+    { "from": "...", "to": "...", "type": "blocking" | "informational" }
+  ],
+  "completedWorkSummary": "<summary of what completed agents accomplished, for injection into new agents>"
+}
+
+For "continue" and "abort": newSubtasks and newDependencies should be empty arrays.`;
+
+export const replanPrompt = Handlebars.compile(REPLAN_PROMPT_SOURCE, {
+	noEscape: true,
+});

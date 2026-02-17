@@ -9,7 +9,11 @@ export {
 	intentAnalysisSystemPrompt,
 } from "./intent-analysis.ts";
 export { notificationDecisionPrompt } from "./notification-decision.ts";
-export { planningSystemPrompt, taskAnalysisPrompt } from "./planning.ts";
+export {
+	planningSystemPrompt,
+	replanPrompt,
+	taskAnalysisPrompt,
+} from "./planning.ts";
 export { sharingDecisionPrompt } from "./sharing-decision.ts";
 export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
@@ -26,7 +30,11 @@ import {
 	intentAnalysisSystemPrompt,
 } from "./intent-analysis.ts";
 import { notificationDecisionPrompt } from "./notification-decision.ts";
-import { planningSystemPrompt, taskAnalysisPrompt } from "./planning.ts";
+import {
+	planningSystemPrompt,
+	replanPrompt,
+	taskAnalysisPrompt,
+} from "./planning.ts";
 import { sharingDecisionPrompt } from "./sharing-decision.ts";
 import { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
@@ -41,6 +49,7 @@ export const templates = {
 	// Planning
 	planningSystem: planningSystemPrompt,
 	taskAnalysis: taskAnalysisPrompt,
+	replan: replanPrompt,
 
 	// Context analysis (notifications)
 	contextAnalysisSystem: contextAnalysisSystemPrompt,

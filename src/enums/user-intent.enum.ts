@@ -30,6 +30,9 @@ export enum UserIntent {
 	 */
 	APPROVE_AGENT = "approve_agent",
 
+	/** The user wants to trigger a replan of the current execution. */
+	REPLAN = "replan",
+
 	/** The intent could not be determined. */
 	UNKNOWN = "unknown",
 }

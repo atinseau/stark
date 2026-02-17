@@ -740,6 +740,7 @@ describe("Intent analysis example JSONs pass structural validation", () => {
 		"context_injection",
 		"cancel",
 		"approve_agent",
+		"replan",
 		"unknown",
 	];
 

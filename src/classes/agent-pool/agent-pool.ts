@@ -27,6 +27,7 @@ import type {
 	PromptResult,
 } from "../../types/agent.types.ts";
 import type {
+	AgentContextState,
 	AgentExecutionResult,
 	AgentFactory,
 	AgentPoolConfig,
@@ -41,18 +42,26 @@ import type {
 	PoolEventMap,
 	PoolManagedAgent,
 	ProjectContext,
+	ReplanDecision,
+	ReplanRequest,
 	SharingDecision,
 	SignificanceContext,
 	StructuredContextInjection,
 	SubTask,
 	SubtaskRetryConfig,
 	TaskAnalysis,
+	TaskDependency,
 } from "../../types/agent-pool.types.ts";
 import {
 	ContextInjectionCategory,
 	ContextInjectionPriority,
+	ReplanTrigger,
 } from "../../types/agent-pool.types.ts";
-import { SubtaskTimeoutError, toErrorMessage } from "../../utils/errors.ts";
+import {
+	ReplanRestartError,
+	SubtaskTimeoutError,
+	toErrorMessage,
+} from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import { generateIdentity } from "../../utils/identity.ts";
 import { Agent } from "../agent/agent.ts";
@@ -86,6 +95,7 @@ function validateIntentAnalysis(data: unknown): IntentAnalysis | null {
 		"context_injection",
 		"cancel",
 		"approve_agent",
+		"replan",
 		"unknown",
 	];
 	if (typeof obj.intent !== "string" || !validIntents.includes(obj.intent))
@@ -232,7 +242,6 @@ export class AgentPool extends EventEmitter {
 	private _currentStrategy: ExecutionStrategy | null = null;
 
 	/** The current task analysis, if planning is complete. */
-	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: tracked for future introspection and debugging
 	private _currentAnalysis: TaskAnalysis | null = null;
 
 	/** All currently managed agents, keyed by agent ID. */
@@ -276,6 +285,15 @@ export class AgentPool extends EventEmitter {
 	/** Running count of subtask timeouts triggered during current execution. */
 	private _timeoutCount = 0;
 
+	/** Number of replanning attempts in the current execution. */
+	private _replanCount = 0;
+
+	/** Maximum replanning attempts (from config). */
+	private readonly _maxReplanAttempts: number;
+
+	/** Whether replanning is enabled (from config). */
+	private readonly _enableReplanning: boolean;
+
 	// ── Constructor ────────────────────────────────────────────────────
 
 	constructor(config: AgentPoolConfig) {
@@ -289,6 +307,10 @@ export class AgentPool extends EventEmitter {
 			temperature: config.temperature ?? 0.2,
 			...config,
 		};
+
+		// Replanning configuration
+		this._maxReplanAttempts = config.maxReplanAttempts ?? 2;
+		this._enableReplanning = config.enableReplanning !== false; // default true
 
 		// Agent factory — defaults to real Agent class
 		this.agentFactory =
@@ -396,6 +418,52 @@ export class AgentPool extends EventEmitter {
 			);
 		}
 
+		const MAX_RESTARTS = 1; // Only allow one full restart
+		let restartCount = 0;
+
+		while (restartCount <= MAX_RESTARTS) {
+			try {
+				return await this._executeInternal(task);
+			} catch (error) {
+				if (
+					error instanceof ReplanRestartError &&
+					restartCount < MAX_RESTARTS
+				) {
+					this.logger.info(
+						{
+							restartCount,
+							reasoning: error.decision.reasoning,
+						},
+						"Restarting execution due to replan decision",
+					);
+					restartCount++;
+					// Reset state and retry
+					await this.destroyManagedAgents();
+					this.subtaskToAgent.clear();
+					this.agentToSubtask.clear();
+					this._deltaCount = 0;
+					this._sharingDecisionCount = 0;
+					this._replanCount = 0; // Reset replan count for the fresh start
+					continue;
+				}
+				throw error;
+			}
+		}
+
+		throw new Error("Execution restart loop exceeded maximum attempts");
+	}
+
+	/**
+	 * Internal execution logic, extracted from execute() to support restart.
+	 *
+	 * Contains the full 5-phase execution pipeline:
+	 * 1. Planning
+	 * 2. Agent spawning
+	 * 3. Subtask execution (with replanning support)
+	 * 4. Summary generation
+	 * 5. Cleanup
+	 */
+	private async _executeInternal(task: string): Promise<AgentPoolResult> {
 		const startTime = Date.now();
 		this._executing = true;
 		this._currentTask = task;
@@ -548,6 +616,11 @@ export class AgentPool extends EventEmitter {
 
 			return poolResult;
 		} catch (error) {
+			// Let ReplanRestartError propagate to execute() for restart handling
+			if (error instanceof ReplanRestartError) {
+				throw error;
+			}
+
 			const errorMessage = toErrorMessage(error);
 
 			this.emitPoolEvent(PoolEvent.ERROR, {
@@ -574,6 +647,7 @@ export class AgentPool extends EventEmitter {
 			this._sharingSummaries = [];
 			this._retryCount = 0;
 			this._timeoutCount = 0;
+			this._replanCount = 0;
 		}
 	}
 
@@ -711,6 +785,18 @@ export class AgentPool extends EventEmitter {
 
 				await this.destroyManagedAgents();
 				return "Current execution cancelled. All agents destroyed.";
+			}
+
+			case UserIntent.REPLAN: {
+				if (!this._executing || !this._currentAnalysis) {
+					return "No active execution to replan.";
+				}
+
+				// Note: Full user-triggered replanning requires async coordination
+				// with the running execution loop. For this evolution, the intent
+				// is recognized but the actual trigger mechanism uses automatic
+				// triggers (failure, deadlock, cascading failures).
+				return "Replan evaluation requested. The system will evaluate whether the current plan should be modified.";
 			}
 
 			default:
@@ -1075,21 +1161,26 @@ export class AgentPool extends EventEmitter {
 		const inProgress = new Set<string>();
 		const remaining = new Set(analysis.subtasks.map((s) => s.id));
 
-		// Build blocking dependency adjacency
-		const blockingDeps = new Map<string, Set<string>>();
-		for (const subtask of analysis.subtasks) {
-			const blockers = new Set<string>();
-			for (const depId of subtask.dependencies) {
-				// Check if this dependency is blocking
-				const dep = analysis.dependencies.find(
-					(d) => d.from === depId && d.to === subtask.id,
-				);
-				if (!dep || dep.type === "blocking") {
-					blockers.add(depId);
+		// Build blocking dependency adjacency — rebuilt after replan modify
+		const rebuildBlockingDeps = (): Map<string, Set<string>> => {
+			const blockingDeps = new Map<string, Set<string>>();
+			for (const subtask of analysis.subtasks) {
+				if (completed.has(subtask.id)) continue; // Skip completed subtasks
+				const blockers = new Set<string>();
+				for (const depId of subtask.dependencies) {
+					const dep = analysis.dependencies.find(
+						(d) => d.from === depId && d.to === subtask.id,
+					);
+					if (!dep || dep.type === "blocking") {
+						blockers.add(depId);
+					}
 				}
+				blockingDeps.set(subtask.id, blockers);
 			}
-			blockingDeps.set(subtask.id, blockers);
-		}
+			return blockingDeps;
+		};
+
+		let blockingDeps = rebuildBlockingDeps();
 
 		/**
 		 * Returns subtask IDs that are ready to execute:
@@ -1138,7 +1229,35 @@ export class AgentPool extends EventEmitter {
 					"Subtask execution deadlocked — remaining tasks have unsatisfiable dependencies",
 				);
 
-				// Mark remaining as failed
+				// ── Replan on deadlock ────────────────────────────────────
+				const deadlockDecision = await this.evaluateReplan(
+					ReplanTrigger.DEADLOCK,
+					analysis,
+					agents,
+					completed,
+					failed,
+					remaining,
+					`Deadlock detected: subtasks ${[...remaining].join(", ")} have unsatisfiable dependencies. ` +
+						`Completed: ${[...completed].join(", ")}. Failed: ${[...failed].join(", ")}.`,
+				);
+
+				if (deadlockDecision && deadlockDecision.action === "modify") {
+					const result = await this.applyReplanDecision(
+						deadlockDecision,
+						analysis,
+						agents,
+						completed,
+						failed,
+						remaining,
+					);
+					if (result.continueExecution) {
+						// Rebuild blocking deps with the new subtasks
+						blockingDeps = rebuildBlockingDeps();
+						continue; // Try again with the modified plan
+					}
+				}
+
+				// If replan didn't happen or said continue/abort, use existing deadlock handling
 				for (const id of remaining) {
 					const entry = agents.get(id);
 					if (entry) {
@@ -1227,6 +1346,56 @@ export class AgentPool extends EventEmitter {
 					completed.add(subtaskId);
 				} else {
 					failed.add(subtaskId);
+					inProgress.delete(subtaskId);
+
+					// ── Replan on subtask failure (post-retry exhaustion) ──
+					const failedCount = failed.size;
+					const trigger =
+						failedCount >= 2
+							? ReplanTrigger.CASCADING_FAILURES
+							: ReplanTrigger.SUBTASK_FAILURE;
+
+					const replanDecision = await this.evaluateReplan(
+						trigger,
+						analysis,
+						agents,
+						completed,
+						failed,
+						remaining,
+						`Subtask "${subtaskId}" (${subtask.role}) failed after ${executionResult.retryCount} retries: ${executionResult.error ?? "unknown"}`,
+					);
+
+					if (replanDecision && replanDecision.action !== "continue") {
+						const replanResult = await this.applyReplanDecision(
+							replanDecision,
+							analysis,
+							agents,
+							completed,
+							failed,
+							remaining,
+						);
+
+						if (replanResult.restart) {
+							// Break out of executeSubtasks and restart execute()
+							throw new ReplanRestartError(replanDecision);
+						}
+						// For "modify": rebuild blocking deps, continue the while loop
+						if (replanResult.continueExecution) {
+							blockingDeps = rebuildBlockingDeps();
+						}
+					}
+
+					// Store in managed agents map and emit event (already done for success below)
+					const managedEntry = this.managedAgents.get(executionResult.agentId);
+					if (managedEntry) {
+						managedEntry.result = executionResult;
+					}
+					this.emitPoolEvent(PoolEvent.AGENT_ERROR, {
+						agentId: executionResult.agentId,
+						agentName: executionResult.agentName,
+						error: executionResult.error ?? "unknown",
+					});
+					return;
 				}
 				inProgress.delete(subtaskId);
 
@@ -1236,19 +1405,11 @@ export class AgentPool extends EventEmitter {
 					managedEntry.result = executionResult;
 				}
 
-				if (executionResult.success) {
-					this.emitPoolEvent(PoolEvent.AGENT_COMPLETED, {
-						agentId: executionResult.agentId,
-						agentName: executionResult.agentName,
-						result: executionResult,
-					});
-				} else {
-					this.emitPoolEvent(PoolEvent.AGENT_ERROR, {
-						agentId: executionResult.agentId,
-						agentName: executionResult.agentName,
-						error: executionResult.error ?? "unknown",
-					});
-				}
+				this.emitPoolEvent(PoolEvent.AGENT_COMPLETED, {
+					agentId: executionResult.agentId,
+					agentName: executionResult.agentName,
+					result: executionResult,
+				});
 			});
 
 			await Promise.allSettled(executionPromises);
@@ -1680,6 +1841,285 @@ export class AgentPool extends EventEmitter {
 			timedOut,
 			subtaskDurationMs,
 		};
+	}
+
+	// ── Private: Replanning ────────────────────────────────────────────
+
+	/**
+	 * Evaluates whether the current execution should be replanned.
+	 *
+	 * Called when:
+	 * - A subtask fails after exhausting all retries (SUBTASK_FAILURE)
+	 * - A deadlock is detected in executeSubtasks() (DEADLOCK)
+	 * - Multiple subtasks have failed (CASCADING_FAILURES)
+	 *
+	 * @param trigger - What caused the replan evaluation.
+	 * @param analysis - The original task analysis.
+	 * @param agents - The spawned agents map.
+	 * @param completed - Set of completed subtask IDs.
+	 * @param failed - Set of failed subtask IDs.
+	 * @param remaining - Set of remaining subtask IDs.
+	 * @param problemDescription - Human-readable description of the problem.
+	 * @returns The replan decision, or null if replanning is disabled/exhausted.
+	 */
+	private async evaluateReplan(
+		trigger: ReplanTrigger,
+		analysis: TaskAnalysis,
+		agents: Map<string, { agent: PoolManagedAgent; subtask: SubTask }>,
+		completed: Set<string>,
+		failed: Set<string>,
+		remaining: Set<string>,
+		problemDescription: string,
+	): Promise<ReplanDecision | null> {
+		// Guard: replanning disabled or max attempts reached
+		if (!this._enableReplanning) return null;
+		if (this._replanCount >= this._maxReplanAttempts) {
+			this.logger.info(
+				{ replanCount: this._replanCount, max: this._maxReplanAttempts },
+				"Max replan attempts reached — proceeding without replanning",
+			);
+			return null;
+		}
+
+		// Guard: single-agent strategy doesn't benefit from replanning
+		if (analysis.strategy === ExecutionStrategy.SINGLE) return null;
+
+		this._replanCount++;
+
+		this.emitPoolEvent(PoolEvent.REPLAN_START, {
+			trigger,
+			problemDescription,
+		});
+
+		// Build the replan request
+		const agentStates = analysis.subtasks.map((subtask) => {
+			const entry = agents.get(subtask.id);
+			const ctxState = entry
+				? this.contextTracker.getAgentState(entry.agent.id)
+				: undefined;
+
+			return {
+				subtaskId: subtask.id,
+				agentName: entry?.agent.name ?? subtask.role,
+				role: subtask.role,
+				completed: completed.has(subtask.id),
+				failed: failed.has(subtask.id),
+				error: ctxState?.error ?? null,
+				accomplishedSummary: this.buildAccomplishedSummary(ctxState),
+				filesWritten: ctxState?.filesWritten ?? [],
+			};
+		});
+
+		const blockedSubtaskIds = [...remaining].filter((id) => !failed.has(id));
+
+		const request: ReplanRequest = {
+			trigger,
+			originalTask: this._currentTask ?? "",
+			originalAnalysis: analysis,
+			agentStates,
+			blockedSubtaskIds,
+			problemDescription,
+		};
+
+		const decision = await this.planner.replan(request);
+
+		this.emitPoolEvent(PoolEvent.REPLAN_COMPLETE, { decision });
+
+		return decision;
+	}
+
+	/**
+	 * Builds a short summary of what an agent accomplished based on its context state.
+	 */
+	private buildAccomplishedSummary(
+		state: AgentContextState | undefined,
+	): string {
+		if (!state) return "No information available.";
+
+		const parts: string[] = [];
+
+		if (state.promptResults.length > 0) {
+			const lastResult = state.promptResults[state.promptResults.length - 1];
+			if (lastResult?.text) {
+				parts.push(
+					`Response (${lastResult.text.length} chars): ${lastResult.text.slice(0, 300)}`,
+				);
+			}
+		}
+
+		if (state.filesWritten.length > 0) {
+			parts.push(`Files written: ${state.filesWritten.join(", ")}`);
+		}
+
+		if (state.events.length > 0) {
+			parts.push(`Events: ${state.events.length} total`);
+		}
+
+		return parts.length > 0
+			? parts.join(". ")
+			: "Agent did not produce significant output.";
+	}
+
+	/**
+	 * Applies a replan decision to the current execution.
+	 *
+	 * For "modify": destroys failed/blocked agents, spawns new agents
+	 * for the new subtasks, and injects the completedWorkSummary.
+	 *
+	 * For "restart": destroys all agents and throws ReplanRestartError.
+	 *
+	 * For "abort": throws an error.
+	 *
+	 * For "continue": no action (caller continues the execution loop).
+	 *
+	 * @param decision - The replan decision to apply.
+	 * @param analysis - The original analysis (mutated for "modify").
+	 * @param agents - The agents map (mutated for "modify").
+	 * @param completed - Set of completed subtask IDs (preserved).
+	 * @param failed - Set of failed subtask IDs (cleared for modified tasks).
+	 * @param remaining - Set of remaining subtask IDs (replaced for modified tasks).
+	 * @returns Whether execution should continue (true) or restart/abort (false).
+	 */
+	private async applyReplanDecision(
+		decision: ReplanDecision,
+		analysis: TaskAnalysis,
+		agents: Map<string, { agent: PoolManagedAgent; subtask: SubTask }>,
+		completed: Set<string>,
+		failed: Set<string>,
+		remaining: Set<string>,
+	): Promise<{ continueExecution: boolean; restart: boolean }> {
+		switch (decision.action) {
+			case "continue":
+				this.logger.info("Replan decision: continue with current plan");
+				return { continueExecution: true, restart: false };
+
+			case "abort":
+				this.logger.warn(
+					{ reasoning: decision.reasoning },
+					"Replan decision: abort execution",
+				);
+				throw new Error(
+					`Execution aborted by replanner: ${decision.reasoning}`,
+				);
+
+			case "restart":
+				this.logger.info("Replan decision: restart from scratch");
+				await this.destroyManagedAgents();
+				return { continueExecution: false, restart: true };
+
+			case "modify": {
+				this.logger.info(
+					{
+						newSubtaskCount: decision.newSubtasks.length,
+						newDepCount: decision.newDependencies.length,
+					},
+					`Replan decision: modify plan — ${decision.newSubtasks.length} new subtask(s)`,
+				);
+
+				// 1. Destroy agents for failed and blocked subtasks
+				for (const subtaskId of [...failed, ...remaining]) {
+					const entry = agents.get(subtaskId);
+					if (entry) {
+						if (entry.agent.status !== AgentStatus.DESTROYED) {
+							await entry.agent.destroy().catch(() => {});
+						}
+						this.managedAgents.delete(entry.agent.id);
+						this.contextTracker.unregisterAgent(entry.agent.id);
+						this.agentToSubtask.delete(entry.agent.id);
+					}
+					agents.delete(subtaskId);
+					this.subtaskToAgent.delete(subtaskId);
+				}
+
+				// 2. Clear failed and remaining sets
+				failed.clear();
+				remaining.clear();
+
+				// 3. Update analysis with new subtasks and dependencies
+				// Note: we mutate the analysis object here — it's local to executeSubtasks
+				const mergedSubtasks = [
+					...analysis.subtasks.filter((s) => completed.has(s.id)),
+					...decision.newSubtasks,
+				];
+				(analysis as { subtasks: SubTask[] }).subtasks = mergedSubtasks;
+				(analysis as { dependencies: TaskDependency[] }).dependencies =
+					decision.newDependencies;
+
+				// 4. Add new subtask IDs to remaining
+				for (const subtask of decision.newSubtasks) {
+					remaining.add(subtask.id);
+				}
+
+				// 5. Spawn new agents for the new subtasks
+				for (const subtask of decision.newSubtasks) {
+					const agentConfig: AgentConfig = {
+						logOutput: this.config.logOutput,
+						logLevel: this.config.logLevel,
+						cwd: this.config.cwd,
+						...this.config.agentConfig,
+						name: subtask.role,
+					};
+
+					const agent = this.agentFactory(agentConfig);
+
+					this.contextTracker.registerAgent(agent.id, agent.name, subtask);
+					this.subtaskToAgent.set(subtask.id, agent.id);
+					this.agentToSubtask.set(agent.id, subtask.id);
+					this.wireAgentEvents(agent, subtask);
+
+					const entry = {
+						agent,
+						subtask,
+						result: null as AgentExecutionResult | null,
+					};
+					this.managedAgents.set(agent.id, entry);
+					agents.set(subtask.id, { agent, subtask });
+
+					this.emitPoolEvent(PoolEvent.AGENT_SPAWNED, {
+						agentId: agent.id,
+						agentName: agent.name,
+						subtask,
+					});
+
+					try {
+						await agent.ready;
+					} catch (err) {
+						this.contextTracker.markFailed(agent.id, toErrorMessage(err));
+					}
+
+					// 6. Inject completed work summary into new agents
+					if (decision.completedWorkSummary) {
+						agent.injectContext({
+							content: decision.completedWorkSummary,
+							priority: ContextInjectionPriority.HIGH,
+							category: ContextInjectionCategory.SHARED_CONTEXT,
+							source: "replanner",
+							dependencyType: null,
+							timestamp: isoNow(),
+						});
+					}
+				}
+
+				// 7. Update the information broker with new dependencies
+				this.informationBroker = new InformationBroker(
+					this.conversations,
+					this.contextTracker,
+					decision.newDependencies,
+					this.logger,
+					this.subtaskToAgent,
+					this.agentToSubtask,
+				);
+
+				return { continueExecution: true, restart: false };
+			}
+
+			default:
+				this.logger.warn(
+					{ action: decision.action },
+					"Unknown replan action — continuing",
+				);
+				return { continueExecution: true, restart: false };
+		}
 	}
 
 	// ── Private: Delta Handling ─────────────────────────────────────────
