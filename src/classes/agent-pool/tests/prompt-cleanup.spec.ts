@@ -27,6 +27,7 @@ function makeDelta(overrides?: Partial<ContextDelta>): ContextDelta {
 		summary: "Prompt completed",
 		data: {},
 		significance: 0.8,
+		promptResultSummary: null,
 		...overrides,
 	};
 }

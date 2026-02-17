@@ -292,4 +292,125 @@ describe("ContextTracker", () => {
 		expect(delta!.significance).toBe(1.0);
 		expect(tracker.getAgentState("agent-1")!.error).toBe("Connection failed");
 	});
+
+	it("uses a 2000-char preview for prompt completion payloads", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const longText = "a".repeat(5000);
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText: longText,
+		});
+
+		expect(delta).not.toBeNull();
+		const data = delta!.data as {
+			responsePreview?: string;
+			isComplete?: boolean;
+		};
+		expect(data.responsePreview?.length).toBe(2000);
+		expect(data.isComplete).toBe(false);
+	});
+
+	it("marks isComplete true when prompt completion text is short", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const shortText = "b".repeat(1500);
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText: shortText,
+		});
+
+		expect(delta).not.toBeNull();
+		const data = delta!.data as {
+			responsePreview?: string;
+			isComplete?: boolean;
+		};
+		expect(data.responsePreview?.length).toBe(1500);
+		expect(data.isComplete).toBe(true);
+	});
+
+	it("does not build promptResultSummary for short responses", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const shortText = "c".repeat(1500);
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText: shortText,
+		});
+
+		expect(delta).not.toBeNull();
+		expect(delta!.promptResultSummary).toBeNull();
+	});
+
+	it("builds promptResultSummary for long responses", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const prefix = "Intro ".padEnd(500, "I");
+		const suffix = "Outro ".padEnd(500, "O");
+		const body = "x".repeat(9000);
+		const fullText = `${prefix} src/routes/users.ts ${body} ${suffix}`;
+
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText,
+		});
+
+		expect(delta).not.toBeNull();
+		expect(delta!.promptResultSummary).not.toBeNull();
+		expect(delta!.promptResultSummary).toContain("src/routes/users.ts");
+		expect(delta!.promptResultSummary).toContain(prefix.trim());
+		expect(delta!.promptResultSummary).toContain(suffix.trim());
+		expect(delta!.promptResultSummary!.length).toBeLessThanOrEqual(1500);
+	});
+
+	it("keeps promptResultSummary null for non-prompt deltas", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const delta = tracker.processEvent("agent-1", AgentEvent.TOOL_COMPLETE, {
+			toolCallId: "tc-1",
+			title: "Write file",
+		});
+
+		expect(delta).not.toBeNull();
+		expect(delta!.promptResultSummary).toBeNull();
+	});
+
+	it("extracts file paths from long prompt results", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const fullText = [
+			"Updated src/routes/users.ts with new endpoints.",
+			"Config moved to ./config.json and tests/api.test.ts updated.",
+			"See http://example.com for docs.",
+		].join("\n");
+
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText: fullText.repeat(200),
+		});
+
+		expect(delta).not.toBeNull();
+		expect(delta!.promptResultSummary).toContain("src/routes/users.ts");
+		expect(delta!.promptResultSummary).toContain("./config.json");
+		expect(delta!.promptResultSummary).toContain("tests/api.test.ts");
+		// The URL may appear in the bookend text (Start/End sections), but it
+		// should NOT be extracted as a file path in the "Files:" section.
+		const filesLine = delta!.promptResultSummary!.split("\n\n")[0];
+		expect(filesLine).toStartWith("Files:");
+		expect(filesLine).not.toContain("http://example.com");
+	});
+
+	it("builds summaries capped at 1500 characters", () => {
+		tracker.registerAgent("agent-1", "Alpha", subtask);
+
+		const longText = `src/routes/users.ts ${"x".repeat(50000)}`;
+		const delta = tracker.processEvent("agent-1", AgentEvent.PROMPT_COMPLETE, {
+			stopReason: "end_turn",
+			fullText: longText,
+		});
+
+		expect(delta).not.toBeNull();
+		expect(delta!.promptResultSummary).not.toBeNull();
+		expect(delta!.promptResultSummary!.length).toBeLessThanOrEqual(1500);
+	});
 });

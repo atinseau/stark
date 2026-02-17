@@ -33,6 +33,7 @@ describe("NotificationEngine", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const agentState = {
@@ -78,6 +79,7 @@ describe("NotificationEngine", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -121,6 +123,7 @@ describe("NotificationEngine", () => {
 			summary: "Tool completed",
 			data: {},
 			significance: 0.5, // Below threshold of 0.8
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -168,6 +171,7 @@ describe("NotificationEngine", () => {
 			summary: "Tool completed",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -210,6 +214,7 @@ describe("NotificationEngine", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -260,6 +265,7 @@ describe("NotificationEngine", () => {
 			summary: "Agent became idle",
 			data: {},
 			significance: 0.3,
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -298,6 +304,7 @@ describe("NotificationEngine", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const result = await engine.evaluate(delta, {
@@ -364,6 +371,7 @@ describe("Notification conditional behavior", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const agentState = {

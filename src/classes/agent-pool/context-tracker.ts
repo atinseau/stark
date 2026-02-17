@@ -66,6 +66,12 @@ const EVENT_SIGNIFICANCE: ReadonlyMap<
  */
 const MAX_EVENTS_PER_AGENT = 200;
 
+/**
+ * Maximum length of the response preview in delta data.
+ * Responses longer than this are summarized in `promptResultSummary`.
+ */
+const PROMPT_RESULT_PREVIEW_LENGTH = 2000;
+
 // ── ContextTracker ─────────────────────────────────────────────────────────
 
 /**
@@ -197,6 +203,17 @@ export class ContextTracker {
 		const mapping = EVENT_SIGNIFICANCE.get(event);
 		if (!mapping) return null;
 
+		let promptResultSummary: string | null = null;
+		if (
+			event === AgentEvent.PROMPT_COMPLETE &&
+			typeof payload.fullText === "string"
+		) {
+			const fullText = payload.fullText;
+			if (fullText.length > PROMPT_RESULT_PREVIEW_LENGTH) {
+				promptResultSummary = this.buildPromptResultSummary(fullText);
+			}
+		}
+
 		// Build the delta
 		const delta: ContextDelta = {
 			agentId: state.agentId,
@@ -206,6 +223,7 @@ export class ContextTracker {
 			summary: contextEvent.summary,
 			data: contextEvent.data,
 			significance: mapping.significance,
+			promptResultSummary,
 		};
 
 		state.lastDelta = delta;
@@ -497,17 +515,22 @@ export class ContextTracker {
 		payload: Record<string, unknown>,
 	): Record<string, unknown> {
 		switch (event) {
-			case AgentEvent.PROMPT_COMPLETE:
+			case AgentEvent.PROMPT_COMPLETE: {
+				const fullText =
+					typeof payload.fullText === "string" ? payload.fullText : "";
 				return {
 					stopReason: payload.stopReason,
 					responsePreview:
 						typeof payload.fullText === "string"
-							? payload.fullText.slice(0, 500)
+							? payload.fullText.slice(0, PROMPT_RESULT_PREVIEW_LENGTH)
 							: undefined,
-					responseLength:
-						typeof payload.fullText === "string" ? payload.fullText.length : 0,
+					responseLength: fullText.length,
 					usage: payload.usage,
+					isComplete:
+						fullText.length > 0 &&
+						fullText.length <= PROMPT_RESULT_PREVIEW_LENGTH,
 				};
+			}
 
 			case AgentEvent.TOOL_START:
 				return {
@@ -578,6 +601,56 @@ export class ContextTracker {
 			default:
 				return {};
 		}
+	}
+
+	/**
+	 * Builds a structured summary of a long prompt result.
+	 *
+	 * Uses heuristic extraction (no LLM call) to identify key elements:
+	 * - File paths mentioned
+	 * - The start and end of the response (bookends)
+	 *
+	 * This is intentionally fast and imperfect — the goal is to provide
+	 * enough context for the sharing LLM to make informed decisions,
+	 * not to produce a polished summary.
+	 *
+	 * @param fullText - The complete agent response text.
+	 * @returns A structured summary string, limited to ~1500 chars.
+	 */
+	private buildPromptResultSummary(fullText: string): string {
+		const MAX_SUMMARY_LENGTH = 1500;
+		const sections: string[] = [];
+
+		const filePaths = this.extractFilePaths(fullText);
+		if (filePaths.length > 0) {
+			sections.push(`Files: ${filePaths.slice(0, 10).join(", ")}`);
+		}
+
+		const intro = fullText.slice(0, 500).trim();
+		const outro = fullText.slice(-500).trim();
+
+		sections.push(`Start: ${intro}`);
+		if (fullText.length > 1000) {
+			sections.push(`End: ${outro}`);
+		}
+
+		sections.push(`Total response: ${fullText.length} chars`);
+
+		const summary = sections.join("\n\n");
+		return summary.length > MAX_SUMMARY_LENGTH
+			? `${summary.slice(0, MAX_SUMMARY_LENGTH)}…`
+			: summary;
+	}
+
+	/**
+	 * Extracts file paths from agent response text.
+	 * Looks for common patterns like `src/foo/bar.ts`, `./config.json`, etc.
+	 */
+	private extractFilePaths(text: string): string[] {
+		const pathPattern =
+			/(?:\.\/|src\/|lib\/|app\/|tests?\/|config\/|public\/|docs?\/|scripts?\/)\S+\.\w{1,10}/g;
+		const matches = text.match(pathPattern) ?? [];
+		return [...new Set(matches)].slice(0, 15);
 	}
 
 	/**

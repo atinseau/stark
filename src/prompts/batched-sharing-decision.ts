@@ -15,6 +15,15 @@ const BATCHED_SHARING_DECISION_SOURCE = `Determine if information from one agent
 - **Summary**: {{delta.summary}}
 - **Data**:
 {{json delta.data}}
+{{#if delta.promptResultSummary}}
+
+### Extended Response Summary
+The agent's full response was {{delta.responseLength}} characters. Here is an extracted summary of the key content:
+
+<response_summary>
+{{delta.promptResultSummary}}
+</response_summary>
+{{/if}}
 
 ## Target Agents
 {{#each targets}}

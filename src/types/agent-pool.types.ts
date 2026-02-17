@@ -266,6 +266,18 @@ export interface ContextDelta {
 	 * - 1.0 = critical (error, task completed)
 	 */
 	readonly significance: number;
+
+	/**
+	 * For PROMPT_COMPLETE deltas: a structured summary of the agent's response,
+	 * extracted to provide more context than the truncated responsePreview.
+	 *
+	 * This field is populated for prompt completions where the full response
+	 * exceeds the preview limit, giving downstream consumers (like the
+	 * InformationBroker) enough context to make informed sharing decisions.
+	 *
+	 * `null` for non-PROMPT_COMPLETE deltas or when the preview is already complete.
+	 */
+	readonly promptResultSummary: string | null;
 }
 
 // ── Context Analysis Types ─────────────────────────────────────────────────

@@ -197,6 +197,7 @@ describe("InformationBroker uses SHARING_ANALYZER", () => {
 			summary: "Completed API implementation",
 			data: { responsePreview: "All endpoints ready" },
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
@@ -241,6 +242,7 @@ describe("NotificationEngine uses CONTEXT_ANALYZER", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		await engine.evaluate(delta, {

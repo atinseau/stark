@@ -6,6 +6,7 @@ import type pino from "pino";
 import { AgentEvent } from "../../enums/agent-event.enum.ts";
 import { AgentStatus } from "../../enums/agent-status.enum.ts";
 import { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import { DeltaType } from "../../enums/delta-type.enum.ts";
 import { ExecutionStrategy } from "../../enums/execution-strategy.enum.ts";
 import { PoolEvent } from "../../enums/pool-event.enum.ts";
 
@@ -34,6 +35,7 @@ import type {
 	PoolEventMap,
 	PoolManagedAgent,
 	ProjectContext,
+	SharingDecision,
 	SubTask,
 	TaskAnalysis,
 } from "../../types/agent-pool.types.ts";
@@ -1292,7 +1294,24 @@ export class AgentPool extends EventEmitter {
 		try {
 			// ── Information Sharing ─────────────────────────────────────
 			if (this.informationBroker && this.contextTracker.agentCount > 1) {
-				const decisions = await this.informationBroker.evaluate(delta);
+				let decisions: SharingDecision[];
+
+				if (delta.type === DeltaType.PROMPT_COMPLETE) {
+					await new Promise((resolve) => setTimeout(resolve, 50));
+					const agentState = this.contextTracker.getAgentState(delta.agentId);
+					const lastPromptResult = agentState?.promptResults.at(-1);
+
+					if (lastPromptResult?.text) {
+						decisions = await this.informationBroker.evaluateWithFullResult(
+							delta,
+							lastPromptResult.text,
+						);
+					} else {
+						decisions = await this.informationBroker.evaluate(delta);
+					}
+				} else {
+					decisions = await this.informationBroker.evaluate(delta);
+				}
 
 				for (const decision of decisions) {
 					this._sharingDecisionCount++;

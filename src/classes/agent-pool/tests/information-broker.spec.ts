@@ -42,6 +42,7 @@ describe("InformationBroker", () => {
 			summary: "Status changed",
 			data: {},
 			significance: 0.3, // Below threshold
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -90,6 +91,7 @@ describe("InformationBroker", () => {
 			summary: "Prompt completed",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -156,6 +158,7 @@ describe("InformationBroker", () => {
 			summary: "API implementation complete",
 			data: { responsePreview: "Created REST endpoints..." },
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -219,6 +222,7 @@ describe("InformationBroker", () => {
 			summary: "Complete",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -268,6 +272,7 @@ describe("InformationBroker", () => {
 			summary: "Complete",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -323,6 +328,7 @@ describe("Information sharing conditional behavior", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -381,6 +387,7 @@ describe("Information sharing conditional behavior", () => {
 			summary: "UI layout completed",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -485,6 +492,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "API implementation complete",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -582,6 +590,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "API complete",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -667,6 +676,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Tests complete",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -729,6 +739,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		// Should not crash
@@ -787,6 +798,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		// Should not crash even without maps
@@ -890,6 +902,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
@@ -960,6 +973,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		// Should not crash, agent-999 just won't be prioritized
@@ -1056,6 +1070,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "API complete",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
@@ -1131,6 +1146,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.9,
+			promptResultSummary: null,
 		};
 
 		const decisions = await broker.evaluate(delta);
@@ -1139,5 +1155,333 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 		expect(decisions).toHaveLength(1);
 		// The dependency should NOT appear in the prompt because the mapping is empty
 		expect(promptHasDependency).toBe(false);
+	});
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Full-result sharing evaluation tests
+// ════════════════════════════════════════════════════════════════════════════
+
+describe("InformationBroker — full result sharing", () => {
+	it("evaluateWithFullResult falls back to standard evaluate when no blocking deps", async () => {
+		let capturedPrompt = "";
+		const mockConversations = {
+			sendOneShotJson: mock((_role: any, prompt: string) => {
+				capturedPrompt = prompt;
+				return Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: false,
+						reasoning: "Not relevant",
+						information: "",
+					},
+				]);
+			}),
+		} as any;
+
+		const tracker = new ContextTracker();
+		tracker.registerAgent("agent-1", "Alpha", {
+			id: "t1",
+			prompt: "Task 1",
+			role: "role1",
+			dependencies: [],
+			priority: 1,
+		});
+		tracker.registerAgent("agent-2", "Beta", {
+			id: "t2",
+			prompt: "Task 2",
+			role: "role2",
+			dependencies: [],
+			priority: 2,
+		});
+
+		const subtaskToAgent = new Map([
+			["t1", "agent-1"],
+			["t2", "agent-2"],
+		]);
+		const agentToSubtask = new Map([
+			["agent-1", "t1"],
+			["agent-2", "t2"],
+		]);
+
+		const broker = new InformationBroker(
+			mockConversations,
+			tracker,
+			[{ from: "t1", to: "t2", type: "informational" }],
+			silentLogger(),
+			subtaskToAgent,
+			agentToSubtask,
+		);
+
+		const delta: ContextDelta = {
+			agentId: "agent-1",
+			agentName: "Alpha",
+			timestamp: new Date().toISOString(),
+			type: DeltaType.PROMPT_COMPLETE,
+			summary: "Done",
+			data: { responsePreview: "short-preview" },
+			significance: 0.9,
+			promptResultSummary: null,
+		};
+
+		await broker.evaluateWithFullResult(delta, "X".repeat(10000));
+
+		expect(capturedPrompt).toContain("short-preview");
+	});
+
+	it("evaluateWithFullResult enriches prompt for blocking dependents", async () => {
+		let capturedPrompt = "";
+		const mockConversations = {
+			sendOneShotJson: mock((_role: any, prompt: string) => {
+				capturedPrompt = prompt;
+				return Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: true,
+						reasoning: "Blocking dependency",
+						information: "Use the API details",
+					},
+				]);
+			}),
+		} as any;
+
+		const tracker = new ContextTracker();
+		tracker.registerAgent("agent-1", "Alpha", {
+			id: "t1",
+			prompt: "Task 1",
+			role: "role1",
+			dependencies: [],
+			priority: 1,
+		});
+		tracker.registerAgent("agent-2", "Beta", {
+			id: "t2",
+			prompt: "Task 2",
+			role: "role2",
+			dependencies: ["t1"],
+			priority: 2,
+		});
+
+		const subtaskToAgent = new Map([
+			["t1", "agent-1"],
+			["t2", "agent-2"],
+		]);
+		const agentToSubtask = new Map([
+			["agent-1", "t1"],
+			["agent-2", "t2"],
+		]);
+
+		const broker = new InformationBroker(
+			mockConversations,
+			tracker,
+			[{ from: "t1", to: "t2", type: "blocking" }],
+			silentLogger(),
+			subtaskToAgent,
+			agentToSubtask,
+		);
+
+		// Build a text where:
+		// - "MARKER" sits within the 5000-char responsePreview
+		// - "HIDDEN_MIDDLE" sits beyond the 5000-char preview AND beyond the
+		//   last 800 chars used by buildQuickSummary's outro, so it should
+		//   NOT appear in the captured prompt at all.
+		const head = "A".repeat(4990);
+		const marker = "MARKER";
+		const middlePad = "B".repeat(2000);
+		const hiddenMiddle = "HIDDEN_MIDDLE";
+		const tailPad = "C".repeat(3000);
+		const fullText = `${head}${marker}${middlePad}${hiddenMiddle}${tailPad}`;
+		// Total: 4990 + 6 + 2000 + 13 + 3000 = 10009 chars
+		// responsePreview = first 5000 chars → contains MARKER (at pos 4990) ✓
+		// buildQuickSummary outro = last 800 chars → last 800 of tailPad (all "C"s) ✓
+		// hiddenMiddle is at pos ~6996, outside both windows
+
+		const delta: ContextDelta = {
+			agentId: "agent-1",
+			agentName: "Alpha",
+			timestamp: new Date().toISOString(),
+			type: DeltaType.PROMPT_COMPLETE,
+			summary: "Done",
+			data: { responsePreview: "short-preview" },
+			significance: 0.9,
+			promptResultSummary: null,
+		};
+
+		await broker.evaluateWithFullResult(delta, fullText);
+
+		expect(capturedPrompt).toContain(marker);
+		expect(capturedPrompt).not.toContain(hiddenMiddle);
+		expect(capturedPrompt).toContain("### Extended Response Summary");
+		expect(capturedPrompt).toContain("[...");
+	});
+
+	it("buildQuickSummary provides intro/outro fallback when promptResultSummary is null", async () => {
+		let capturedPrompt = "";
+		const mockConversations = {
+			sendOneShotJson: mock((_role: any, prompt: string) => {
+				capturedPrompt = prompt;
+				return Promise.resolve([
+					{
+						targetAgentId: "agent-2",
+						shouldShare: true,
+						reasoning: "Blocking dependency",
+						information: "Use the API details",
+					},
+				]);
+			}),
+		} as any;
+
+		const tracker = new ContextTracker();
+		tracker.registerAgent("agent-1", "Alpha", {
+			id: "t1",
+			prompt: "Task 1",
+			role: "role1",
+			dependencies: [],
+			priority: 1,
+		});
+		tracker.registerAgent("agent-2", "Beta", {
+			id: "t2",
+			prompt: "Task 2",
+			role: "role2",
+			dependencies: ["t1"],
+			priority: 2,
+		});
+
+		const subtaskToAgent = new Map([
+			["t1", "agent-1"],
+			["t2", "agent-2"],
+		]);
+		const agentToSubtask = new Map([
+			["agent-1", "t1"],
+			["agent-2", "t2"],
+		]);
+
+		const broker = new InformationBroker(
+			mockConversations,
+			tracker,
+			[{ from: "t1", to: "t2", type: "blocking" }],
+			silentLogger(),
+			subtaskToAgent,
+			agentToSubtask,
+		);
+
+		const intro = "INTRO_MARKER ";
+		const outro = "OUTRO_MARKER";
+		const fullText = `${intro}${"a".repeat(3000)}${"b".repeat(3000)}${outro}`;
+
+		const delta: ContextDelta = {
+			agentId: "agent-1",
+			agentName: "Alpha",
+			timestamp: new Date().toISOString(),
+			type: DeltaType.PROMPT_COMPLETE,
+			summary: "Done",
+			data: { responsePreview: "short-preview" },
+			significance: 0.9,
+			promptResultSummary: null,
+		};
+
+		await broker.evaluateWithFullResult(delta, fullText);
+
+		expect(capturedPrompt).toContain(intro.trim());
+		expect(capturedPrompt).toContain(outro);
+		expect(capturedPrompt).toContain("[...");
+	});
+
+	it("uses higher maxTokens when promptResultSummary is present", async () => {
+		let capturedOptions: any = null;
+		const mockConversations = {
+			sendOneShotJson: mock(
+				(_role: any, _prompt: string, _validator: any, options: any) => {
+					capturedOptions = options;
+					return Promise.resolve([
+						{
+							targetAgentId: "agent-2",
+							shouldShare: false,
+							reasoning: "Nope",
+							information: "",
+						},
+						{
+							targetAgentId: "agent-3",
+							shouldShare: false,
+							reasoning: "Nope",
+							information: "",
+						},
+						{
+							targetAgentId: "agent-4",
+							shouldShare: false,
+							reasoning: "Nope",
+							information: "",
+						},
+					]);
+				},
+			),
+		} as any;
+
+		const tracker = new ContextTracker();
+		tracker.registerAgent("agent-1", "Alpha", {
+			id: "t1",
+			prompt: "Task 1",
+			role: "role1",
+			dependencies: [],
+			priority: 1,
+		});
+		tracker.registerAgent("agent-2", "Beta", {
+			id: "t2",
+			prompt: "Task 2",
+			role: "role2",
+			dependencies: [],
+			priority: 2,
+		});
+		tracker.registerAgent("agent-3", "Gamma", {
+			id: "t3",
+			prompt: "Task 3",
+			role: "role3",
+			dependencies: [],
+			priority: 3,
+		});
+		tracker.registerAgent("agent-4", "Delta", {
+			id: "t4",
+			prompt: "Task 4",
+			role: "role4",
+			dependencies: [],
+			priority: 4,
+		});
+
+		const subtaskToAgent = new Map([
+			["t1", "agent-1"],
+			["t2", "agent-2"],
+			["t3", "agent-3"],
+			["t4", "agent-4"],
+		]);
+		const agentToSubtask = new Map([
+			["agent-1", "t1"],
+			["agent-2", "t2"],
+			["agent-3", "t3"],
+			["agent-4", "t4"],
+		]);
+
+		const broker = new InformationBroker(
+			mockConversations,
+			tracker,
+			[],
+			silentLogger(),
+			subtaskToAgent,
+			agentToSubtask,
+		);
+
+		const delta: ContextDelta = {
+			agentId: "agent-1",
+			agentName: "Alpha",
+			timestamp: new Date().toISOString(),
+			type: DeltaType.PROMPT_COMPLETE,
+			summary: "Done",
+			data: {},
+			significance: 0.9,
+			promptResultSummary: "summary",
+		};
+
+		await broker.evaluate(delta);
+
+		expect(capturedOptions).not.toBeNull();
+		expect(capturedOptions.maxTokens).toBe(1500);
 	});
 });

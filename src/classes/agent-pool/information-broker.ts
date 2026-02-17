@@ -300,6 +300,45 @@ export class InformationBroker {
 		return results;
 	}
 
+	/**
+	 * Evaluates sharing for a completed prompt result with access to the full
+	 * response text when blocking dependents exist.
+	 *
+	 * Falls back to the standard evaluation for non-blocking cases.
+	 */
+	async evaluateWithFullResult(
+		delta: ContextDelta,
+		fullResultText: string,
+	): Promise<SharingDecision[]> {
+		const sourceSubtaskId = this.agentToSubtask.get(delta.agentId);
+		if (!sourceSubtaskId) {
+			return this.evaluate(delta);
+		}
+
+		const hasBlockingDependents = this.dependencies.some(
+			(dep) => dep.from === sourceSubtaskId && dep.type === "blocking",
+		);
+
+		if (!hasBlockingDependents) {
+			return this.evaluate(delta);
+		}
+
+		const previewLimit = 5000;
+		const enrichedDelta: ContextDelta = {
+			...delta,
+			data: {
+				...delta.data,
+				responsePreview: fullResultText.slice(0, previewLimit),
+				responseLength: fullResultText.length,
+				isComplete: fullResultText.length <= previewLimit,
+			},
+			promptResultSummary:
+				delta.promptResultSummary ?? this.buildQuickSummary(fullResultText),
+		};
+
+		return this.evaluate(enrichedDelta);
+	}
+
 	// ── Statistics ────────────────────────────────────────────────────
 
 	/** Total number of individual sharing evaluations performed. */
@@ -382,6 +421,20 @@ export class InformationBroker {
 	}
 
 	// ── Private ──────────────────────────────────────────────────────
+
+	/**
+	 * Builds a quick summary of a long text for sharing evaluation.
+	 * Used as a fallback when promptResultSummary is not available.
+	 */
+	private buildQuickSummary(text: string): string {
+		if (text.length <= 2000) return text;
+
+		const intro = text.slice(0, 800);
+		const outro = text.slice(-800);
+		const omitted = text.length - 1600;
+
+		return `${intro}\n\n[...${omitted} chars omitted...]\n\n${outro}`;
+	}
 
 	/**
 	 * Finds all agents that are potential targets for information sharing.
@@ -538,6 +591,11 @@ export class InformationBroker {
 				type: delta.type,
 				summary: delta.summary,
 				data: delta.data,
+				promptResultSummary: delta.promptResultSummary ?? null,
+				responseLength:
+					typeof delta.data.responseLength === "number"
+						? delta.data.responseLength
+						: null,
 			},
 			targets,
 		});
@@ -552,12 +610,16 @@ export class InformationBroker {
 		);
 
 		try {
+			const effectiveMaxTokens = delta.promptResultSummary
+				? 500 * targetStates.length
+				: 300 * targetStates.length;
+
 			// Use one-shot to avoid polluting the conversation history
 			const batchDecisions = await this.conversations.sendOneShotJson(
 				ConversationRole.SHARING_ANALYZER,
 				prompt,
 				validateBatchedSharingDecision,
-				{ maxTokens: 300 * targetStates.length, maxJsonAttempts: 2 },
+				{ maxTokens: effectiveMaxTokens, maxJsonAttempts: 2 },
 			);
 
 			// Map the results into SharingDecision[] with sourceAgentId

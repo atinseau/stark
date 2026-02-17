@@ -338,6 +338,7 @@ describe("InformationBroker — Sharing Deduplication", () => {
 			summary: "Wrote products routes",
 			data: { path: "src/routes/products.ts" },
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
@@ -411,6 +412,7 @@ describe("InformationBroker — Sharing Deduplication", () => {
 			summary: "Completed prompt",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
@@ -483,6 +485,7 @@ describe("InformationBroker — Sharing Deduplication", () => {
 			summary: "Done",
 			data: {},
 			significance: 0.8,
+			promptResultSummary: null,
 		};
 
 		await broker.evaluate(delta);
