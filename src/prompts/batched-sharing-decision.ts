@@ -40,6 +40,54 @@ const BATCHED_SHARING_DECISION_SOURCE = `Determine if information from one agent
 4. Is the information concrete and actionable?
 5. Has similar or identical information already been shared to this target? If yes, do NOT re-share — only share genuinely NEW information that adds value beyond what was previously communicated.
 
+## Examples
+
+### Example 1: Share — blocking dependency fulfilled
+Source agent "api-developer" just completed writing \`src/routes/users.ts\` with endpoints GET/POST/PUT/DELETE /users.
+Target agent "test-writer" is working on writing integration tests for the API.
+Previously shared: Nothing yet.
+
+Good decision:
+{
+  "decisions": [
+    {
+      "targetAgentId": "agent-test-writer-id",
+      "shouldShare": true,
+      "reasoning": "The test writer needs to know the exact endpoint signatures and response formats to write accurate tests. This is a blocking dependency.",
+      "information": "The users API has been implemented in src/routes/users.ts with the following endpoints: GET /users (returns User[]), POST /users (body: {name, email}, returns User), PUT /users/:id (body: partial User, returns User), DELETE /users/:id (returns 204). User model: {id: string, name: string, email: string, createdAt: Date}."
+    }
+  ]
+}
+
+### Example 2: Share new info only — avoids redundancy with previous shares
+Same source agent later writes \`src/routes/products.ts\`.
+Previously shared to test-writer: "[file_written] The users API has been implemented in src/routes/users.ts with the following endpoints..."
+
+Good decision (only shares NEW information):
+{
+  "decisions": [
+    {
+      "targetAgentId": "agent-test-writer-id",
+      "shouldShare": true,
+      "reasoning": "New products API endpoints are relevant for the test writer. User API info was already shared — only sharing the NEW products information.",
+      "information": "A new products API has been added in src/routes/products.ts: GET /products, POST /products (body: {name, price}), GET /products/:id. Product model: {id: string, name: string, price: number}."
+    }
+  ]
+}
+
+### Example 3: Don't share — irrelevant to target's task
+Source "frontend-dev" updated CSS styling. Target "test-writer" writes backend tests.
+{
+  "decisions": [
+    {
+      "targetAgentId": "agent-test-writer-id",
+      "shouldShare": false,
+      "reasoning": "CSS styling changes are purely visual and have no impact on backend test logic. Sharing would be noise.",
+      "information": ""
+    }
+  ]
+}
+
 ## JSON Output
 Return one decision per target agent:
 {

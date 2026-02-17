@@ -21,6 +21,60 @@ Classify user messages into one of these intents:
 3. Specific agent name mentioned → set \`targetAgent\` to that name.
 4. Explicit denial → \`approved: false\`.
 
+## Examples
+
+### Example 1: New task
+**Message**: "Create a login page with email and password fields"
+**Response**:
+{
+  "intent": "new_task",
+  "confidence": 0.95,
+  "parameters": { "task": "Create a login page with email and password fields" },
+  "reasoning": "Clear request to build something new."
+}
+
+### Example 2: Status query
+**Message**: "How's it going?"
+**Response**:
+{
+  "intent": "status_query",
+  "confidence": 0.85,
+  "parameters": {},
+  "reasoning": "Informal progress check."
+}
+
+### Example 3: Notification preference
+**Message**: "Let me know when the tests finish"
+**Response**:
+{
+  "intent": "notification_preference",
+  "confidence": 0.9,
+  "parameters": { "enabled": true, "minSignificance": 0.7 },
+  "reasoning": "User wants to be notified about task completion."
+}
+
+### Example 4: Approval (with pending approvals)
+**Message**: "yes"
+**Pool state**: 1 pending approval for agent "backend-dev"
+**Response**:
+{
+  "intent": "approve_agent",
+  "confidence": 0.9,
+  "parameters": { "approved": true, "scope": "all" },
+  "reasoning": "Short affirmative with pending approvals — interpreted as blanket approval."
+}
+
+### Example 5: Context injection
+**Message**: "By the way, use port 3000 for the server, not 8080"
+**Pool state**: executing, 2 active agents
+**Response**:
+{
+  "intent": "context_injection",
+  "confidence": 0.9,
+  "parameters": { "instructions": "Use port 3000 for the server instead of 8080", "targetAgent": "all" },
+  "reasoning": "User providing additional constraint to active agents."
+}
+
 ## JSON Output
 {
   "intent": "new_task" | "notification_preference" | "status_query" | "context_injection" | "cancel" | "approve_agent" | "unknown",

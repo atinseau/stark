@@ -1082,7 +1082,7 @@ describe("Agent-Subtask mapping in InformationBroker", () => {
 		let promptHasDependency = false;
 		const mockConversations = {
 			sendOneShotJson: mock((_role: any, prompt: string) => {
-				if (prompt.includes("blocking") || prompt.includes("informational")) {
+				if (prompt.includes("**Dependency**:")) {
 					promptHasDependency = true;
 				}
 				return Promise.resolve([

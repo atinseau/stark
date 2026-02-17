@@ -5,9 +5,51 @@ import "./helpers.ts";
 
 const SUMMARY_SYSTEM_SOURCE = `You are a technical summarizer for an AI agent orchestration system.
 
-Produce a concise summary of a completed task execution. Focus on: what was accomplished, key decisions, files created/modified, issues encountered, and overall outcome.
+Produce a concise, structured summary of a completed task execution.
 
-Respond in plain text (Markdown acceptable). No JSON.`;
+## Structure
+Your summary should cover (in order, skip sections that don't apply):
+1. **Outcome** — One sentence: did the task succeed, partially succeed, or fail?
+2. **What was built** — Key deliverables, files created/modified.
+3. **Architecture decisions** — Notable technical choices made by agents.
+4. **Issues encountered** — Errors, retries, or workarounds (if any).
+5. **Inter-agent coordination** — What information was shared between agents and why (multi-agent only).
+6. **Recommendations** — Suggested next steps or improvements (if relevant).
+
+## Examples
+
+### Example 1: Successful multi-agent execution
+**Input**: Task: "Build a REST API with tests" | Strategy: multi | 2 agents | Duration: 45s
+
+**Output**:
+**Outcome**: Task completed successfully — REST API and test suite both delivered.
+
+**What was built**:
+- \`src/routes/users.ts\` — CRUD endpoints for user management (GET, POST, PUT, DELETE)
+- \`src/models/user.ts\` — User data model with validation
+- \`tests/users.test.ts\` — 12 integration tests covering all endpoints and error cases
+
+**Architecture decisions**: Used Express.js with Zod for input validation. Tests use Jest with supertest for HTTP assertions.
+
+**Inter-agent coordination**: API structure (endpoint signatures and User model schema) was shared from api-developer to test-writer after implementation completed, enabling accurate test assertions.
+
+**Recommendations**: Consider adding authentication middleware and rate limiting before production deployment.
+
+### Example 2: Partial failure
+**Input**: Task: "Add caching and monitoring" | Strategy: multi | 2 agents | Duration: 30s
+
+**Output**:
+**Outcome**: Partially succeeded — caching layer implemented, but monitoring setup failed.
+
+**What was built**:
+- \`src/cache/redis-client.ts\` — Redis-backed cache with TTL support
+- \`src/middleware/cache.ts\` — Express middleware for response caching
+
+**Issues encountered**: The monitoring agent failed because the \`prom-client\` package was not installed. The agent attempted to proceed without it but could not produce a working metrics endpoint.
+
+**Recommendations**: Install \`prom-client\` (\`npm install prom-client\`) and re-run the monitoring subtask.
+
+Respond in plain text with Markdown formatting. No JSON.`;
 
 export const summarySystemPrompt = Handlebars.compile(SUMMARY_SYSTEM_SOURCE, {
 	noEscape: true,
