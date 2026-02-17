@@ -268,7 +268,7 @@ export class OpenRouterClient {
 				// Validator returned null/undefined → invalid structure
 				this.logger.warn(
 					{ attempt },
-					"JSON validation failed, requesting correction",
+					`JSON validation failed (attempt ${attempt + 1}), retrying`,
 				);
 
 				conversationMessages = [
@@ -284,7 +284,7 @@ export class OpenRouterClient {
 
 				this.logger.warn(
 					{ attempt, error: errMsg },
-					"JSON parse failed, requesting correction",
+					`JSON parse failed (attempt ${attempt + 1}) — ${errMsg}`,
 				);
 
 				conversationMessages = [

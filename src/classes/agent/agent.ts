@@ -175,7 +175,7 @@ export class Agent extends EventEmitter {
 		});
 
 		// Start the root session span immediately so traceId is available
-		this.tracer.startRootSpan(SpanName.AGENT_SESSION, {
+		this.tracer.startRootSpan(this.agentSpanName(SpanName.AGENT_SESSION), {
 			"agent.id": this.identity.id,
 			"agent.name": this.identity.name,
 		});
@@ -199,6 +199,7 @@ export class Agent extends EventEmitter {
 			this.logger,
 			this.tracer,
 			emitEvent,
+			this.identity.name,
 		);
 
 		// Initialize the ACP client factory
@@ -226,6 +227,7 @@ export class Agent extends EventEmitter {
 							});
 						},
 			},
+			this.identity.name,
 		);
 
 		// Wire terminal manager callbacks to our event system
@@ -264,7 +266,7 @@ export class Agent extends EventEmitter {
 		// (prevents "Missing" span entries).
 		this.logger.info(
 			{ agentId: this.identity.id, agentName: this.identity.name },
-			"Agent session started",
+			"Session started",
 		);
 
 		// Start async initialization — consumers await `agent.ready`
@@ -317,7 +319,10 @@ export class Agent extends EventEmitter {
 			promptIndex,
 		});
 
-		this.logger.info({ promptIndex }, `Prompt: ${truncate(fullPrompt, 100)}`);
+		this.logger.info(
+			{ promptIndex, promptLength: fullPrompt.length },
+			`Prompting (#${promptIndex}, ${fullPrompt.length} chars)`,
+		);
 
 		if (!this.connection || !this._sessionId) {
 			throw new Error("Agent is not connected or has no session");
@@ -325,7 +330,7 @@ export class Agent extends EventEmitter {
 
 		try {
 			const promptResult = await this.tracer.wrap(
-				SpanName.AGENT_PROMPT,
+				this.agentSpanName(SpanName.AGENT_PROMPT, `#${promptIndex}`),
 				{
 					"prompt.index": promptIndex,
 					"prompt.text": fullPrompt.slice(0, 500),
@@ -370,7 +375,7 @@ export class Agent extends EventEmitter {
 					responseLength: promptResult.text.length,
 					usage: promptResult.usage,
 				},
-				"Prompt completed",
+				`Prompt complete — ${promptResult.stopReason}, ${promptResult.text.length} chars`,
 			);
 
 			this.setStatus(AgentStatus.IDLE);
@@ -491,7 +496,7 @@ export class Agent extends EventEmitter {
 	async destroy(): Promise<void> {
 		if (this._status === AgentStatus.DESTROYED) return;
 
-		this.logger.info("Destroying agent…");
+		this.logger.info("Shutting down");
 
 		// Mark as destroyed early so the process "exit" handler
 		// knows this is an intentional shutdown and doesn't emit
@@ -541,7 +546,7 @@ export class Agent extends EventEmitter {
 
 		this.emitTyped(AgentEvent.AGENT_DESTROYED, {});
 
-		this.logger.info("Agent destroyed");
+		this.logger.info("Session closed");
 
 		// ── Tracing: flush all spans and shut down after the last log ────
 		// Placed at the very end so that all logs above retain their
@@ -600,135 +605,148 @@ export class Agent extends EventEmitter {
 	 * Called once from the constructor; consumers await `agent.ready`.
 	 */
 	private async initialize(): Promise<void> {
-		await this.tracer.wrap(SpanName.AGENT_INITIALIZE, async () => {
-			this.logger.debug(
-				{ executable: this.config.executable },
-				"Spawning ACP process",
-			);
-
-			// Spawn the agent process and attach the error listener immediately
-			// (before any microtask tick) so Bun's async ENOENT is always caught.
-			let proc: ChildProcess | undefined;
-			let spawnError: Promise<never>;
-			await this.tracer.wrap(SpanName.AGENT_SPAWN_PROCESS, async () => {
-				const spawned = spawn(this.config.executable, ["--acp", "--stdio"], {
-					stdio: ["pipe", "pipe", "inherit"],
-				});
-				proc = spawned;
-
-				// Listen for spawn errors (e.g. ENOENT when executable doesn't exist).
-				// Must be attached synchronously right after spawn() so the listener
-				// is in place before the event loop fires the error event.
-				spawnError = new Promise<never>((_, reject) => {
-					spawned.once("error", (err) => {
-						reject(
-							new Error(
-								`Failed to start ACP process "${this.config.executable}": ${err.message}`,
-							),
-						);
-					});
-				});
-			});
-
-			if (!proc || !proc.stdin || !proc.stdout) {
-				throw new Error(
-					`Failed to start ACP process "${this.config.executable}" with piped stdio`,
+		await this.tracer.wrap(
+			this.agentSpanName(SpanName.AGENT_INITIALIZE),
+			async () => {
+				this.logger.debug(
+					{ executable: this.config.executable },
+					"Spawning ACP process",
 				);
-			}
 
-			this.process = proc;
-
-			// Handle unexpected process exit
-			proc.once("exit", (code, signal) => {
-				if (this._status !== AgentStatus.DESTROYED) {
-					this.logger.warn({ code, signal }, "ACP process exited unexpectedly");
-					this.setStatus(AgentStatus.ERROR);
-					this.emitTyped(AgentEvent.AGENT_ERROR, {
-						error: new Error(
-							`ACP process exited unexpectedly (code=${code}, signal=${signal})`,
-						),
-						context: "process_exit",
-					});
-				}
-			});
-
-			// Create the NDJSON stream and ACP connection
-			const output = Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>;
-			const input = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
-			const stream = acp.ndJsonStream(output, input);
-
-			// Keep a reference to the raw writable stream for graceful shutdown
-			this.outputStream = output;
-
-			const client = this.acpClientFactory.build((update) =>
-				this.sessionUpdateHandler.handle(update),
-			);
-			this.connection = new acp.ClientSideConnection(
-				(_agent) => client,
-				stream,
-			);
-
-			// Initialize the protocol.
-			// Race against spawnError so that ENOENT is surfaced properly
-			// instead of hanging on the initialize() call.
-			this.logger.debug("Sending ACP initialize request");
-
-			const initResult = await this.tracer.wrap(
-				SpanName.AGENT_ACP_PROTOCOL_INIT,
-				async () => {
-					const result = await Promise.race([
-						this.connection?.initialize({
-							protocolVersion: acp.PROTOCOL_VERSION,
-							clientCapabilities: {
-								fs: {
-									readTextFile: true,
-									writeTextFile: true,
-								},
-								terminal: true,
+				// Spawn the agent process and attach the error listener immediately
+				// (before any microtask tick) so Bun's async ENOENT is always caught.
+				let proc: ChildProcess | undefined;
+				let spawnError: Promise<never>;
+				await this.tracer.wrap(
+					this.agentSpanName(SpanName.AGENT_SPAWN_PROCESS),
+					async () => {
+						const spawned = spawn(
+							this.config.executable,
+							["--acp", "--stdio"],
+							{
+								stdio: ["pipe", "pipe", "inherit"],
 							},
-						}),
-						spawnError,
-					]);
-					if (!result) {
-						throw new Error(
-							"ACP initialize returned no result — connection may be closed",
 						);
-					}
-					return result;
-				},
-			);
+						proc = spawned;
 
-			this.logger.info(
-				{
-					protocolVersion: initResult.protocolVersion,
-					agentInfo: initResult.agentInfo,
-				},
-				"ACP protocol initialized",
-			);
+						// Listen for spawn errors (e.g. ENOENT when executable doesn't exist).
+						// Must be attached synchronously right after spawn() so the listener
+						// is in place before the event loop fires the error event.
+						spawnError = new Promise<never>((_, reject) => {
+							spawned.once("error", (err) => {
+								reject(
+									new Error(
+										`Failed to start ACP process "${this.config.executable}": ${err.message}`,
+									),
+								);
+							});
+						});
+					},
+				);
 
-			// Create a new session
-			this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
+				if (!proc || !proc.stdin || !proc.stdout) {
+					throw new Error(
+						`Failed to start ACP process "${this.config.executable}" with piped stdio`,
+					);
+				}
 
-			const sessionResult = await this.tracer.wrap(
-				SpanName.AGENT_CREATE_SESSION,
-				async () => {
-					const result = await this.connection?.newSession({
-						cwd: this.config.cwd,
-						mcpServers: this.config.mcpServers ?? [],
-					});
-					if (!result) {
-						throw new Error(
-							"ACP newSession returned no result — connection may be closed",
+				this.process = proc;
+
+				// Handle unexpected process exit
+				proc.once("exit", (code, signal) => {
+					if (this._status !== AgentStatus.DESTROYED) {
+						this.logger.warn(
+							{ code, signal },
+							"ACP process exited unexpectedly",
 						);
+						this.setStatus(AgentStatus.ERROR);
+						this.emitTyped(AgentEvent.AGENT_ERROR, {
+							error: new Error(
+								`ACP process exited unexpectedly (code=${code}, signal=${signal})`,
+							),
+							context: "process_exit",
+						});
 					}
-					return result;
-				},
-			);
+				});
 
-			this._sessionId = sessionResult.sessionId;
+				// Create the NDJSON stream and ACP connection
+				const output = Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>;
+				const input = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
+				const stream = acp.ndJsonStream(output, input);
 
-			this.logger.info({ sessionId: this._sessionId }, "Session created");
-		});
+				// Keep a reference to the raw writable stream for graceful shutdown
+				this.outputStream = output;
+
+				const client = this.acpClientFactory.build((update) =>
+					this.sessionUpdateHandler.handle(update),
+				);
+				this.connection = new acp.ClientSideConnection(
+					(_agent) => client,
+					stream,
+				);
+
+				// Initialize the protocol.
+				// Race against spawnError so that ENOENT is surfaced properly
+				// instead of hanging on the initialize() call.
+				this.logger.debug("Sending ACP initialize request");
+
+				const initResult = await this.tracer.wrap(
+					this.agentSpanName(SpanName.AGENT_ACP_PROTOCOL_INIT),
+					async () => {
+						const result = await Promise.race([
+							this.connection?.initialize({
+								protocolVersion: acp.PROTOCOL_VERSION,
+								clientCapabilities: {
+									fs: {
+										readTextFile: true,
+										writeTextFile: true,
+									},
+									terminal: true,
+								},
+							}),
+							spawnError,
+						]);
+						if (!result) {
+							throw new Error(
+								"ACP initialize returned no result — connection may be closed",
+							);
+						}
+						return result;
+					},
+				);
+
+				this.logger.info(
+					{
+						protocolVersion: initResult.protocolVersion,
+						agentInfo: initResult.agentInfo,
+					},
+					`Protocol ready (ACP v${initResult.protocolVersion})`,
+				);
+
+				// Create a new session
+				this.logger.debug({ cwd: this.config.cwd }, "Creating ACP session");
+
+				const sessionResult = await this.tracer.wrap(
+					this.agentSpanName(SpanName.AGENT_CREATE_SESSION),
+					async () => {
+						const result = await this.connection?.newSession({
+							cwd: this.config.cwd,
+							mcpServers: this.config.mcpServers ?? [],
+						});
+						if (!result) {
+							throw new Error(
+								"ACP newSession returned no result — connection may be closed",
+							);
+						}
+						return result;
+					},
+				);
+
+				this._sessionId = sessionResult.sessionId;
+
+				this.logger.info({ sessionId: this._sessionId }, "Session ready");
+			},
+		);
 
 		// Ready!
 		this.setStatus(AgentStatus.IDLE);
@@ -761,6 +779,16 @@ export class Agent extends EventEmitter {
 	}
 
 	// ── Private: Tracing Helpers ─────────────────────────────────────────
+
+	/**
+	 * Builds a consistent agent-specific span name.
+	 *
+	 * @param name - Base span name (usually from SpanName).
+	 * @param suffix - Optional suffix like "#1" for prompt index.
+	 */
+	private agentSpanName(name: SpanName | string, suffix = ""): string {
+		return `${name}:${this.identity.name}${suffix}`;
+	}
 
 	/**
 	 * Ends a terminal span by its terminal ID.

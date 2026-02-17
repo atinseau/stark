@@ -116,6 +116,7 @@ describe("AgentSessionUpdateHandler — Initial State", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		expect(handler.responseText).toBe("");
@@ -131,6 +132,7 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -152,6 +154,7 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -170,6 +173,7 @@ describe("AgentSessionUpdateHandler — Response Text", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -191,6 +195,7 @@ describe("AgentSessionUpdateHandler — agent_message_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -213,6 +218,7 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -231,6 +237,7 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -247,6 +254,7 @@ describe("AgentSessionUpdateHandler — agent_thought_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -267,6 +275,7 @@ describe("AgentSessionUpdateHandler — user_message_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -283,6 +292,7 @@ describe("AgentSessionUpdateHandler — user_message_chunk", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -303,6 +313,7 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -330,6 +341,7 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 			silentLogger(),
 			tracer,
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -349,6 +361,7 @@ describe("AgentSessionUpdateHandler — tool_call", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -374,6 +387,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		// First register the tool call
@@ -405,6 +419,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -437,6 +452,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -469,6 +485,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			tracer,
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -495,6 +512,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			tracer,
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -520,6 +538,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		// Send update without prior tool_call registration
@@ -541,6 +560,7 @@ describe("AgentSessionUpdateHandler — tool_call_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -573,6 +593,7 @@ describe("AgentSessionUpdateHandler — plan", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		const entries = [
@@ -601,6 +622,7 @@ describe("AgentSessionUpdateHandler — current_mode_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -623,6 +645,7 @@ describe("AgentSessionUpdateHandler — config_option_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		const configOptions = [{ id: "opt-1", name: "Model", value: "gpt-4" }];
@@ -647,6 +670,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -670,6 +694,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -688,6 +713,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -707,6 +733,7 @@ describe("AgentSessionUpdateHandler — usage_update", () => {
 			silentLogger(),
 			tracer,
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -733,6 +760,7 @@ describe("AgentSessionUpdateHandler — session_info_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -753,6 +781,7 @@ describe("AgentSessionUpdateHandler — available_commands_update", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -773,6 +802,7 @@ describe("AgentSessionUpdateHandler — unknown update types", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		expect(() => {
@@ -789,6 +819,7 @@ describe("AgentSessionUpdateHandler — unknown update types", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		handler.handle({
@@ -808,6 +839,7 @@ describe("AgentSessionUpdateHandler — Multiple Updates Sequence", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		// Agent starts thinking
@@ -870,6 +902,7 @@ describe("AgentSessionUpdateHandler — Multiple Updates Sequence", () => {
 			silentLogger(),
 			noopTracer(),
 			emitEvent,
+			"test-agent",
 		);
 
 		// First turn

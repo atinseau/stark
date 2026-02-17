@@ -151,7 +151,7 @@ export class NotificationEngine {
 				minSignificance: this.preference.minSignificance,
 				types: this.preference.types,
 			},
-			`Notification preference updated: enabled=${this.preference.enabled}`,
+			`Notifications ${this.preference.enabled ? "enabled" : "disabled"} — threshold: ${this.preference.minSignificance}${this.preference.types ? `, types: ${this.preference.types.join(", ")}` : ""}`,
 		);
 	}
 
@@ -168,7 +168,7 @@ export class NotificationEngine {
 	 */
 	clearPreference(): void {
 		this.preference = null;
-		this.logger.info("Notification preference cleared (silence mode)");
+		this.logger.info("Notifications disabled — silence mode");
 	}
 
 	/**
@@ -356,7 +356,7 @@ export class NotificationEngine {
 					significance: delta.significance,
 					message: decision.message.slice(0, 100),
 				},
-				`User notification generated: ${decision.message.slice(0, 80)}`,
+				`Notification — ${delta.agentName}: ${decision.message.slice(0, 80)}`,
 			);
 
 			return notification;

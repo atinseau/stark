@@ -110,6 +110,7 @@ export class AgentAcpClientFactory {
 		private readonly emitEvent: EmitEventFn,
 		private readonly terminalManager: TerminalManager,
 		private readonly config: AgentAcpClientFactoryConfig,
+		private readonly agentName: string,
 	) {}
 
 	/**
@@ -196,6 +197,13 @@ export class AgentAcpClientFactory {
 	// ── Private Tracing Helpers ────────────────────────────────────────────
 
 	/**
+	 * Formats a span name with the agent name suffix.
+	 */
+	private spanName(name: SpanName): string {
+		return `${name}:${this.agentName}`;
+	}
+
+	/**
 	 * Starts an `agent.terminal` span as a tracked span.
 	 *
 	 * The span is activated for log correlation during creation, then
@@ -210,7 +218,7 @@ export class AgentAcpClientFactory {
 	): void {
 		const span = this.tracer.startTracked(
 			terminalId,
-			SpanName.AGENT_TERMINAL,
+			this.spanName(SpanName.AGENT_TERMINAL),
 			{
 				"terminal.id": terminalId,
 				"terminal.command": command,
@@ -254,7 +262,7 @@ export class AgentAcpClientFactory {
 		const toolCallTitle = params.toolCall.title ?? params.toolCall.toolCallId;
 
 		return this.tracer.wrap(
-			SpanName.AGENT_PERMISSION,
+			this.spanName(SpanName.AGENT_PERMISSION),
 			{
 				"permission.tool_call_id": params.toolCall.toolCallId,
 				...(toolCallTitle && {
@@ -269,7 +277,7 @@ export class AgentAcpClientFactory {
 						toolCallTitle,
 						options: params.options,
 					},
-					`Permission requested: ${toolCallTitle}`,
+					`Permission needed: ${toolCallTitle}`,
 				);
 
 				// Find the first "allow" option — needed for both auto and manual approval
@@ -288,7 +296,7 @@ export class AgentAcpClientFactory {
 								optionId: allowOption.optionId,
 								optionName: allowOption.name,
 							},
-							`Permission auto-approved: ${allowOption.name}`,
+							`Permission granted (auto): ${allowOption.name}`,
 						);
 
 						permSpan.setAttribute("permission.outcome", "granted");
@@ -387,7 +395,7 @@ export class AgentAcpClientFactory {
 		);
 
 		return this.tracer.wrap(
-			SpanName.AGENT_FS_WRITE,
+			this.spanName(SpanName.AGENT_FS_WRITE),
 			{
 				"fs.path": params.path,
 				"fs.operation": "write",
@@ -413,7 +421,7 @@ export class AgentAcpClientFactory {
 		this.logger.info({ path: params.path }, `FS read: ${params.path}`);
 
 		return this.tracer.wrap(
-			SpanName.AGENT_FS_READ,
+			this.spanName(SpanName.AGENT_FS_READ),
 			{
 				"fs.path": params.path,
 				"fs.operation": "read",

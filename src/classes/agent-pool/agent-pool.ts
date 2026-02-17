@@ -375,7 +375,7 @@ export class AgentPool extends EventEmitter {
 				model: this.config.model,
 				maxAgents: this.config.maxAgents,
 			},
-			"AgentPool created",
+			`Pool initialized — model: ${this.config.model}, max agents: ${this.config.maxAgents}`,
 		);
 	}
 

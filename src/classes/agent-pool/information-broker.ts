@@ -35,9 +35,7 @@ const MAX_AGENT_EVALUATION_BUFFER_SIZE = 5;
  * Returns `null` on invalid data so the OpenRouter client can
  * retry with a correction prompt.
  */
-function validateBatchedSharingDecision(
-	data: unknown,
-): Array<{
+function validateBatchedSharingDecision(data: unknown): Array<{
 	targetAgentId: string;
 	shouldShare: boolean;
 	reasoning: string;

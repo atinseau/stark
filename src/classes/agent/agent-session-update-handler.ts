@@ -115,6 +115,7 @@ export class AgentSessionUpdateHandler {
 		private readonly logger: pino.Logger,
 		private readonly tracer: Tracer,
 		private readonly emitEvent: EmitEventFn,
+		private readonly agentName: string,
 	) {}
 
 	// ── Response Text ────────────────────────────────────────────────────
@@ -250,7 +251,7 @@ export class AgentSessionUpdateHandler {
 				locations: update.locations,
 				command,
 			},
-			`Tool: ${update.title}${command ? ` → $ ${command}` : ""}`,
+			`Tool started — ${update.title}${command ? ` → $ ${command}` : ""}`,
 		);
 
 		this.emitEvent(AgentEvent.TOOL_START, {
@@ -283,6 +284,12 @@ export class AgentSessionUpdateHandler {
 
 		// Log FIRST while the tool call span is still in the context stack,
 		// so the log line carries the tool call's SpanId (not the prompt's).
+		const statusLabel =
+			update.status === "completed"
+				? "complete"
+				: update.status === "failed"
+					? "failed"
+					: (update.status ?? "update");
 		this.logger.info(
 			{
 				toolCallId: update.toolCallId,
@@ -291,7 +298,7 @@ export class AgentSessionUpdateHandler {
 				exitCode,
 				output: output ? truncate(output, 500) : undefined,
 			},
-			`Tool update: ${title} → ${update.status ?? "update"}${exitCode != null ? ` (exit ${exitCode})` : ""}`,
+			`Tool ${statusLabel} — ${title}${exitCode != null ? ` (exit ${exitCode})` : ""}`,
 		);
 
 		// Tracing: update or end tool call span (after logging)
@@ -342,7 +349,10 @@ export class AgentSessionUpdateHandler {
 
 	/** Logs each plan entry and emits a plan update event. */
 	private handlePlan(update: PlanUpdate): void {
-		this.logger.info({ entryCount: update.entries.length }, "Plan updated");
+		this.logger.info(
+			{ entryCount: update.entries.length },
+			`Plan updated — ${update.entries.length} entries`,
+		);
 
 		for (const entry of update.entries) {
 			this.logger.info(
@@ -368,7 +378,7 @@ export class AgentSessionUpdateHandler {
 	private handleCurrentModeUpdate(update: CurrentModeUpdate): void {
 		this.logger.info(
 			{ modeId: update.currentModeId },
-			`Mode changed: ${update.currentModeId}`,
+			`Mode changed → ${update.currentModeId}`,
 		);
 		this.emitEvent(AgentEvent.MODE_CHANGE, {
 			modeId: update.currentModeId,
@@ -427,7 +437,7 @@ export class AgentSessionUpdateHandler {
 	): void {
 		this.tracer.startTracked(
 			toolCallId,
-			SpanName.AGENT_TOOL_CALL,
+			`${SpanName.AGENT_TOOL_CALL}:${this.agentName}`,
 			{
 				"tool.call_id": toolCallId,
 				"tool.title": title,

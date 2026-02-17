@@ -356,7 +356,10 @@ export class TaskPlanner {
 			constraints: constraints ?? null,
 		});
 
-		this.logger.info({ taskLength: task.length }, "Starting task analysis");
+		this.logger.info(
+			{ taskLength: task.length },
+			`Analyzing task (${task.length} chars)`,
+		);
 
 		// Attempt to get a semantically valid analysis from the LLM
 		let lastAnalysis: TaskAnalysis | null = null;
@@ -390,9 +393,7 @@ export class TaskPlanner {
 							dependencyCount: analysis.dependencies.length,
 							parallelismBenefit: analysis.parallelismBenefit,
 						},
-						`Task analysis complete: strategy=${analysis.strategy}, ` +
-							`complexity=${analysis.complexity}, ` +
-							`subtasks=${analysis.subtasks.length}`,
+						`Analysis complete — ${analysis.strategy}, ${analysis.complexity}, ${analysis.subtasks.length} subtask(s)`,
 					);
 
 					return analysis;
@@ -401,7 +402,7 @@ export class TaskPlanner {
 				// Semantic errors found — log and retry
 				this.logger.warn(
 					{ attempt, semanticErrors },
-					"Task analysis has semantic errors, requesting correction",
+					`Analysis has semantic errors (attempt ${attempt + 1}), retrying`,
 				);
 
 				lastAnalysis = analysis;
@@ -411,7 +412,7 @@ export class TaskPlanner {
 						attempt,
 						error: toErrorMessage(error),
 					},
-					"Task analysis attempt failed",
+					`Analysis attempt ${attempt + 1} failed — ${toErrorMessage(error)}`,
 				);
 
 				// If this was a JSON validation error, retry is already
@@ -424,7 +425,7 @@ export class TaskPlanner {
 
 		// All retries exhausted — fall back to single-agent
 		this.logger.warn(
-			"Task analysis retries exhausted, falling back to single-agent strategy",
+			"Analysis retries exhausted — falling back to single-agent",
 		);
 
 		return this.buildFallback(task);
@@ -465,7 +466,7 @@ export class TaskPlanner {
 	 * planning fails.
 	 */
 	private buildFallback(task: string): TaskAnalysis {
-		this.logger.info("Using single-agent fallback strategy");
+		this.logger.info("Using single-agent fallback");
 
 		return {
 			strategy: ExecutionStrategy.SINGLE,
