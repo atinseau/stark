@@ -54,6 +54,8 @@ import type {
 	TaskDependency,
 } from "../../types/agent-pool.types.ts";
 import {
+	CheckpointAction,
+	CheckpointTrigger,
 	ContextInjectionCategory,
 	ContextInjectionPriority,
 	ReplanTrigger,
@@ -71,6 +73,7 @@ import {
 	ApprovalManager,
 	type ApprovalResolution,
 } from "./approval-manager.ts";
+import { CheckpointEvaluator } from "./checkpoint-evaluator.ts";
 import { ContextTracker } from "./context-tracker.ts";
 import { ConversationManager } from "./conversation-manager.ts";
 import { InformationBroker } from "./information-broker.ts";
@@ -284,6 +287,12 @@ export class AgentPool extends EventEmitter {
 
 	/** Information broker (created per-execution since it needs dependencies). */
 	private informationBroker: InformationBroker | null = null;
+
+	/** Mid-execution checkpoint evaluator (multi-agent only). */
+	private checkpointEvaluator: CheckpointEvaluator | null = null;
+
+	/** Execution start time for checkpoint timing. */
+	private _executionStartTime: number = 0;
 
 	/** Running count of deltas detected. */
 	private _deltaCount = 0;
@@ -593,6 +602,17 @@ export class AgentPool extends EventEmitter {
 				this.agentToSubtask,
 			);
 
+			// Create the checkpoint evaluator for multi-agent executions
+			if (analysis.strategy === ExecutionStrategy.MULTI) {
+				this.checkpointEvaluator = new CheckpointEvaluator(
+					this.conversations,
+					this.contextTracker,
+					this.logger,
+					this.config.checkpoints,
+				);
+			}
+			this._executionStartTime = Date.now();
+
 			this.logger.info(
 				{ subtaskCount: analysis.subtasks.length },
 				`Executing ${analysis.subtasks.length} subtask(s)`,
@@ -723,6 +743,9 @@ export class AgentPool extends EventEmitter {
 			this._currentStrategy = null;
 			this._currentAnalysis = null;
 			this.informationBroker = null;
+			this.checkpointEvaluator?.reset();
+			this.checkpointEvaluator = null;
+			this._executionStartTime = 0;
 			this.subtaskToAgent.clear();
 			this.agentToSubtask.clear();
 			this._deltaCount = 0;
@@ -2365,6 +2388,25 @@ export class AgentPool extends EventEmitter {
 					});
 				}
 			}
+
+			// ── Checkpoint Evaluation ──────────────────────────────────
+			if (this.checkpointEvaluator && this._currentAnalysis) {
+				const completedCount = this.contextTracker
+					.getAllAgentStates()
+					.filter((s) => s.completed).length;
+
+				const trigger = this.checkpointEvaluator.shouldTrigger(
+					this._deltaCount,
+					completedCount,
+					this._currentAnalysis.subtasks.length,
+					Date.now() - this._executionStartTime,
+				);
+
+				if (trigger) {
+					// Fire-and-forget — don't block the delta handler
+					void this.executeCheckpoint(trigger);
+				}
+			}
 		} catch (error) {
 			this.logger.warn(
 				{
@@ -2373,6 +2415,170 @@ export class AgentPool extends EventEmitter {
 					error: toErrorMessage(error),
 				},
 				"Delta handling failed (non-critical)",
+			);
+		}
+	}
+
+	// ── Private: Checkpoint Execution ──────────────────────────────────
+
+	/**
+	 * Executes a checkpoint evaluation and acts on the result.
+	 *
+	 * This method is called fire-and-forget from handleDelta() when a
+	 * checkpoint trigger fires. It evaluates the execution health and
+	 * applies the recommended action.
+	 *
+	 * @param trigger - The trigger type that caused this checkpoint.
+	 */
+	private async executeCheckpoint(trigger: CheckpointTrigger): Promise<void> {
+		if (
+			!this.checkpointEvaluator ||
+			!this._currentAnalysis ||
+			!this._currentTask ||
+			!this._executing
+		) {
+			return;
+		}
+
+		try {
+			const result = await this.checkpointEvaluator.evaluate(
+				trigger,
+				this._currentTask,
+				this._currentAnalysis,
+				this._deltaCount,
+				this._sharingDecisionCount,
+				Date.now() - this._executionStartTime,
+				// recentDecisions — pass from session memory if available (evolution 14)
+				undefined,
+			);
+
+			// Emit the checkpoint event
+			this.emitPoolEvent(PoolEvent.CHECKPOINT_EVALUATED, { result });
+
+			// Act on the result
+			switch (result.action) {
+				case CheckpointAction.CONTINUE:
+					// Nothing to do — just log
+					this.logger.debug(
+						{ healthScore: result.healthScore },
+						"Checkpoint: continue",
+					);
+					break;
+
+				case CheckpointAction.ADJUST:
+					// Inject corrections into affected agents
+					for (const [agentId, correction] of result.corrections) {
+						const entry = this.managedAgents.get(agentId);
+						if (entry && entry.agent.status !== AgentStatus.DESTROYED) {
+							const injection: StructuredContextInjection = {
+								content: correction,
+								priority: ContextInjectionPriority.HIGH,
+								category: ContextInjectionCategory.COORDINATION_ALERT,
+								source: "checkpoint-evaluator",
+								dependencyType: null,
+								timestamp: isoNow(),
+							};
+
+							try {
+								entry.agent.injectContext(injection);
+								this.logger.info(
+									{ agentId, correctionLength: correction.length },
+									"Checkpoint correction injected",
+								);
+							} catch {
+								this.logger.warn(
+									{ agentId },
+									"Failed to inject checkpoint correction",
+								);
+							}
+						}
+					}
+					break;
+
+				case CheckpointAction.REPLAN:
+					// Trigger re-planning (evolution 11 mechanism)
+					this.logger.warn(
+						{ reasoning: result.reasoning },
+						"Checkpoint recommends re-planning",
+					);
+					// If the replan mechanism from evolution 11 is available:
+					// void this.triggerReplan(result.reasoning);
+					// For now, log and notify the user
+					if (this.notificationEngine.isEnabled) {
+						this.emitPoolEvent(PoolEvent.NOTIFICATION, {
+							notification: {
+								message: `⚠️ Checkpoint alert: ${result.statusSummary}`,
+								significance: 0.9,
+								agentId: "pool",
+								agentName: "AgentPool",
+								type: DeltaType.PLAN_UPDATE,
+								timestamp: isoNow(),
+							},
+						});
+					}
+					break;
+
+				case CheckpointAction.ESCALATE:
+					// Always notify the user for escalation
+					this.emitPoolEvent(PoolEvent.NOTIFICATION, {
+						notification: {
+							message: `🚨 Execution needs your attention: ${result.statusSummary}`,
+							significance: 1.0,
+							agentId: "pool",
+							agentName: "AgentPool",
+							type: DeltaType.AGENT_ERROR,
+							timestamp: isoNow(),
+						},
+					});
+					this.logger.warn(
+						{ reasoning: result.reasoning },
+						"Checkpoint escalated to user",
+					);
+					break;
+
+				case CheckpointAction.ABORT:
+					this.logger.error(
+						{ reasoning: result.reasoning },
+						"Checkpoint recommends aborting execution",
+					);
+					// Notify user before aborting
+					this.emitPoolEvent(PoolEvent.NOTIFICATION, {
+						notification: {
+							message: `🛑 Execution aborted by checkpoint: ${result.statusSummary}`,
+							significance: 1.0,
+							agentId: "pool",
+							agentName: "AgentPool",
+							type: DeltaType.AGENT_ERROR,
+							timestamp: isoNow(),
+						},
+					});
+					// Cancel execution
+					await this.destroyManagedAgents();
+					break;
+			}
+
+			// Notify user if configured to do so on every checkpoint
+			if (
+				this.config.checkpoints?.notifyOnCheckpoint &&
+				result.action !== CheckpointAction.CONTINUE &&
+				result.action !== CheckpointAction.ESCALATE &&
+				result.action !== CheckpointAction.ABORT
+			) {
+				this.emitPoolEvent(PoolEvent.NOTIFICATION, {
+					notification: {
+						message: `📊 Checkpoint: ${result.statusSummary}`,
+						significance: 0.6,
+						agentId: "pool",
+						agentName: "AgentPool",
+						type: DeltaType.STATUS_CHANGE,
+						timestamp: isoNow(),
+					},
+				});
+			}
+		} catch (error) {
+			this.logger.warn(
+				{ error: toErrorMessage(error), trigger },
+				"Checkpoint execution failed (non-critical)",
 			);
 		}
 	}
@@ -2671,6 +2877,70 @@ export class AgentPool extends EventEmitter {
 					return "The pool is idle. No task is currently being executed.";
 				}
 
+				// Trigger a checkpoint for enriched status if available
+				if (
+					this.checkpointEvaluator &&
+					this._currentAnalysis &&
+					this._currentTask
+				) {
+					const forcedTrigger = this.checkpointEvaluator.forceTrigger(
+						CheckpointTrigger.USER_REQUESTED,
+					);
+
+					if (forcedTrigger) {
+						try {
+							const checkpoint = await this.checkpointEvaluator.evaluate(
+								forcedTrigger,
+								this._currentTask,
+								this._currentAnalysis,
+								this._deltaCount,
+								this._sharingDecisionCount,
+								Date.now() - this._executionStartTime,
+							);
+
+							// Emit the checkpoint event
+							this.emitPoolEvent(PoolEvent.CHECKPOINT_EVALUATED, {
+								result: checkpoint,
+							});
+
+							// Return the enriched status with checkpoint analysis
+							const lines: string[] = [
+								`**Current Task**: ${state.currentTask}`,
+								`**Strategy**: ${state.strategy}`,
+								`**Health Score**: ${(checkpoint.healthScore * 100).toFixed(0)}%`,
+								"",
+								`**Assessment**: ${checkpoint.statusSummary}`,
+								"",
+								`**Agents** (${state.activeAgentCount}):`,
+							];
+
+							for (const agent of state.agents) {
+								lines.push(
+									`- ${agent.agentName} (${agent.taskRole}): ${agent.completed ? "✅ completed" : `⚙️ ${agent.status}`}`,
+								);
+							}
+
+							if (checkpoint.issues.length > 0) {
+								lines.push("", "**Issues**:");
+								for (const issue of checkpoint.issues) {
+									const icon =
+										issue.severity === "critical"
+											? "🔴"
+											: issue.severity === "warning"
+												? "🟡"
+												: "🔵";
+									lines.push(`- ${icon} ${issue.description}`);
+								}
+							}
+
+							return lines.join("\n");
+						} catch {
+							// Fall through to standard status response
+						}
+					}
+				}
+
+				// Standard status response (without checkpoint)
 				const lines: string[] = [
 					`**Current Task**: ${state.currentTask}`,
 					`**Strategy**: ${state.strategy}`,

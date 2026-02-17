@@ -462,6 +462,135 @@ export interface StructuredContextInjection {
 	readonly timestamp: string;
 }
 
+// ── Checkpoint Types ───────────────────────────────────────────────────────
+
+/**
+ * Conditions that trigger a mid-execution checkpoint evaluation.
+ */
+export enum CheckpointTrigger {
+	/** A configured percentage of subtasks have completed. */
+	COMPLETION_PERCENTAGE = "completion_percentage",
+
+	/** A fixed number of deltas have been processed since the last checkpoint. */
+	DELTA_COUNT = "delta_count",
+
+	/** A time interval has elapsed since the last checkpoint. */
+	TIME_INTERVAL = "time_interval",
+
+	/** An agent has failed (complementary to the ReplanTrigger). */
+	AGENT_FAILURE = "agent_failure",
+
+	/** Triggered manually by the user via a STATUS_QUERY intent. */
+	USER_REQUESTED = "user_requested",
+}
+
+/**
+ * Actions recommended by a checkpoint evaluation.
+ */
+export enum CheckpointAction {
+	/** Everything looks healthy — continue without intervention. */
+	CONTINUE = "continue",
+
+	/** Minor issues detected — inject corrective context into affected agents. */
+	ADJUST = "adjust",
+
+	/** Significant structural problems — trigger re-planning (evolution 11). */
+	REPLAN = "replan",
+
+	/** Issues require human judgment — escalate to the user. */
+	ESCALATE = "escalate",
+
+	/** Critical problems detected — abort execution immediately. */
+	ABORT = "abort",
+}
+
+/**
+ * Result of a mid-execution checkpoint evaluation.
+ *
+ * Produced by the CheckpointEvaluator after analysing the global
+ * execution state at a given point in time.
+ */
+export interface CheckpointResult {
+	/** The recommended action. */
+	readonly action: CheckpointAction;
+
+	/** The trigger that caused this checkpoint. */
+	readonly trigger: CheckpointTrigger;
+
+	/** Human-readable explanation of the evaluation. */
+	readonly reasoning: string;
+
+	/**
+	 * Execution health score (0.0 to 1.0).
+	 * 0.0 = critical, 1.0 = perfect.
+	 */
+	readonly healthScore: number;
+
+	/**
+	 * Concise user-facing summary of the current execution state.
+	 * Includes progress, detected problems, and recommendations.
+	 */
+	readonly statusSummary: string;
+
+	/**
+	 * Problems detected during the checkpoint (may be empty).
+	 * Each entry is a distinct issue with its severity.
+	 */
+	readonly issues: ReadonlyArray<{
+		readonly severity: "info" | "warning" | "critical";
+		readonly description: string;
+		readonly affectedAgents: readonly string[];
+	}>;
+
+	/**
+	 * Corrective instructions to inject into specific agents.
+	 * Non-empty only when action === ADJUST.
+	 * Key = agent ID, value = corrective instruction text.
+	 */
+	readonly corrections: ReadonlyMap<string, string>;
+
+	/** ISO-8601 timestamp of the checkpoint. */
+	readonly timestamp: string;
+}
+
+/**
+ * Configuration for mid-execution checkpoints in {@link AgentPoolConfig}.
+ */
+export interface CheckpointConfig {
+	/**
+	 * Enable or disable checkpoints.
+	 * Default: true for multi-agent, false for single-agent.
+	 */
+	readonly enabled?: boolean;
+
+	/**
+	 * Completion percentage(s) that trigger a checkpoint.
+	 * A single number or an array for multiple thresholds.
+	 * Default: 50 (checkpoint at the halfway mark).
+	 */
+	readonly completionPercentages?: number | number[];
+
+	/**
+	 * Number of deltas between periodic checkpoints.
+	 * Default: 30.
+	 */
+	readonly deltaInterval?: number;
+
+	/**
+	 * Time interval in milliseconds between periodic checkpoints.
+	 * Default: 60000 (1 minute).
+	 */
+	readonly timeIntervalMs?: number;
+
+	/**
+	 * Whether every non-CONTINUE checkpoint automatically notifies
+	 * the user. ESCALATE and ABORT always notify regardless of this
+	 * setting.
+	 * Default: false.
+	 */
+	readonly notifyOnCheckpoint?: boolean;
+}
+
 // ── Context Tracking Types ─────────────────────────────────────────────────
 
 /**
@@ -1091,6 +1220,16 @@ export interface AgentPoolConfig {
 	readonly maxReplanAttempts?: number;
 
 	/**
+	 * Configuration for mid-execution checkpoints.
+	 *
+	 * Checkpoints evaluate overall execution health and detect issues
+	 * proactively. Only active for multi-agent executions.
+	 *
+	 * @default { enabled: true, completionPercentages: 50, deltaInterval: 30, timeIntervalMs: 60000 }
+	 */
+	readonly checkpoints?: CheckpointConfig;
+
+	/**
 	 * Optional factory function for creating agents.
 	 *
 	 * When provided, the pool uses this factory instead of directly
@@ -1370,6 +1509,11 @@ export interface ReplanCompleteEvent extends BasePoolEvent {
 	readonly decision: ReplanDecision;
 }
 
+export interface CheckpointEvaluatedEvent extends BasePoolEvent {
+	readonly event: PoolEvent.CHECKPOINT_EVALUATED;
+	readonly result: CheckpointResult;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -1437,4 +1581,5 @@ export interface PoolEventMap {
 	[PoolEvent.APPROVE_REQUEST]: ApproveRequestPoolEvent;
 	[PoolEvent.REPLAN_START]: ReplanStartEvent;
 	[PoolEvent.REPLAN_COMPLETE]: ReplanCompleteEvent;
+	[PoolEvent.CHECKPOINT_EVALUATED]: CheckpointEvaluatedEvent;
 }

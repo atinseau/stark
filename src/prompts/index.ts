@@ -1,5 +1,9 @@
 export { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 export {
+	checkpointPrompt,
+	checkpointSystemPrompt,
+} from "./checkpoint.ts";
+export {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
 	sharingAnalysisSystemPrompt,
@@ -20,6 +24,7 @@ export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 // ── Template Index ─────────────────────────────────────────────────────────
 
 import { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
+import { checkpointPrompt, checkpointSystemPrompt } from "./checkpoint.ts";
 import {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
@@ -68,6 +73,10 @@ export const templates = {
 	// Intent analysis
 	intentAnalysisSystem: intentAnalysisSystemPrompt,
 	intentAnalysis: intentAnalysisPrompt,
+
+	// Checkpoint evaluation
+	checkpointSystem: checkpointSystemPrompt,
+	checkpoint: checkpointPrompt,
 
 	// Execution summary
 	summarySystem: summarySystemPrompt,

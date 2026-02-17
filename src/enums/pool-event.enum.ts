@@ -90,4 +90,14 @@ export enum PoolEvent {
 	 * The payload includes the full {@link ReplanDecision}.
 	 */
 	REPLAN_COMPLETE = "pool:replan-complete",
+
+	/**
+	 * A mid-execution checkpoint was evaluated.
+	 *
+	 * Emitted when the {@link CheckpointEvaluator} completes an
+	 * assessment of the overall execution health. The payload includes
+	 * the full {@link CheckpointResult} with the recommended action,
+	 * health score, detected issues, and any corrective instructions.
+	 */
+	CHECKPOINT_EVALUATED = "pool:checkpoint-evaluated",
 }
