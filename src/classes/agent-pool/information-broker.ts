@@ -554,7 +554,7 @@ export class InformationBroker {
 		try {
 			// Use one-shot to avoid polluting the conversation history
 			const batchDecisions = await this.conversations.sendOneShotJson(
-				ConversationRole.CONTEXT_ANALYZER,
+				ConversationRole.SHARING_ANALYZER,
 				prompt,
 				validateBatchedSharingDecision,
 				{ maxTokens: 300 * targetStates.length, maxJsonAttempts: 2 },

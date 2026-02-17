@@ -15,6 +15,7 @@ import {
 	contextAnalysisSystemPrompt,
 	intentAnalysisPrompt,
 	intentAnalysisSystemPrompt,
+	sharingAnalysisSystemPrompt,
 	summaryPrompt,
 	summarySystemPrompt,
 } from "../../prompts/index.ts";
@@ -296,6 +297,11 @@ export class AgentPool extends EventEmitter {
 			ConversationRole.CONTEXT_ANALYZER,
 			contextAnalysisSystemPrompt({}),
 			modelOverrides[ConversationRole.CONTEXT_ANALYZER],
+		);
+		this.conversations.register(
+			ConversationRole.SHARING_ANALYZER,
+			sharingAnalysisSystemPrompt({}),
+			modelOverrides[ConversationRole.SHARING_ANALYZER],
 		);
 		this.conversations.register(
 			ConversationRole.USER_INTERACTION,

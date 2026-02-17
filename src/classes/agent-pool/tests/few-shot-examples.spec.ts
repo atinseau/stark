@@ -6,6 +6,7 @@ import {
 	intentAnalysisSystemPrompt,
 	notificationDecisionPrompt,
 	planningSystemPrompt,
+	sharingAnalysisSystemPrompt,
 	sharingDecisionPrompt,
 	summarySystemPrompt,
 } from "../../../prompts/index.ts";
@@ -296,31 +297,68 @@ describe("Intent analysis system prompt — few-shot examples", () => {
 // Test 5: Context analysis system prompt contains examples
 // ════════════════════════════════════════════════════════════════════════════
 
-describe("Context analysis system prompt — few-shot examples", () => {
+describe("Context analysis system prompt (notifications) — few-shot examples", () => {
 	const rendered = contextAnalysisSystemPrompt({});
 
-	it("contains Ignore example", () => {
-		expect(rendered).toContain('"action": "ignore"');
-	});
-
-	it("contains Share example", () => {
-		expect(rendered).toContain('"action": "share"');
+	it("contains Don't notify example", () => {
+		expect(rendered).toContain('"shouldNotify": false');
 	});
 
 	it("contains Notify example", () => {
-		expect(rendered).toContain('"action": "notify"');
+		expect(rendered).toContain('"shouldNotify": true');
 	});
 
-	it("examples are placed after the Actions section", () => {
-		const actionsIdx = rendered.indexOf("## Actions");
+	it("does not contain share or clarify actions", () => {
+		expect(rendered).not.toContain('"action": "share"');
+		expect(rendered).not.toContain('"action": "clarify"');
+	});
+
+	it("examples are placed after the Guiding Principle section", () => {
+		const principleIdx = rendered.indexOf("## Guiding Principle");
 		const examplesIdx = rendered.indexOf("## Examples");
-		expect(actionsIdx).toBeGreaterThan(-1);
-		expect(examplesIdx).toBeGreaterThan(actionsIdx);
+		expect(principleIdx).toBeGreaterThan(-1);
+		expect(examplesIdx).toBeGreaterThan(principleIdx);
 	});
 
 	it("examples are placed before the JSON Output section", () => {
 		const examplesIdx = rendered.indexOf("## Examples");
 		const jsonOutputIdx = rendered.indexOf("## JSON Output");
+		expect(examplesIdx).toBeGreaterThan(-1);
+		expect(jsonOutputIdx).toBeGreaterThan(-1);
+		expect(examplesIdx).toBeLessThan(jsonOutputIdx);
+	});
+});
+
+describe("Sharing analysis system prompt — few-shot examples", () => {
+	const rendered = sharingAnalysisSystemPrompt({});
+
+	it("contains Share example", () => {
+		expect(rendered).toContain('"shouldShare": true');
+	});
+
+	it("contains Don't share example", () => {
+		expect(rendered).toContain('"shouldShare": false');
+	});
+
+	it("does not contain notify or clarify actions", () => {
+		// "notify" may appear in negation context ("you do NOT notify"), but not as an action
+		expect(rendered).not.toContain('"shouldNotify"');
+		expect(rendered).not.toContain('"action": "clarify"');
+	});
+
+	it("contains dependency type instructions", () => {
+		expect(rendered).toContain("## Dependency types");
+		expect(rendered).toContain("**blocking**");
+		expect(rendered).toContain("**informational**");
+	});
+
+	it("contains previouslyShared deduplication instructions", () => {
+		expect(rendered).toContain("previouslyShared");
+	});
+
+	it("examples are placed before the JSON Output Format section", () => {
+		const examplesIdx = rendered.indexOf("## Examples");
+		const jsonOutputIdx = rendered.indexOf("## JSON Output Format");
 		expect(examplesIdx).toBeGreaterThan(-1);
 		expect(jsonOutputIdx).toBeGreaterThan(-1);
 		expect(examplesIdx).toBeLessThan(jsonOutputIdx);
@@ -416,8 +454,12 @@ describe("JSON validity of all example blocks", () => {
 		},
 		{ name: "intent analysis system", text: intentAnalysisSystemPrompt({}) },
 		{
-			name: "context analysis system",
+			name: "context analysis system (notifications)",
 			text: contextAnalysisSystemPrompt({}),
+		},
+		{
+			name: "sharing analysis system",
+			text: sharingAnalysisSystemPrompt({}),
 		},
 	];
 
@@ -725,38 +767,55 @@ describe("Intent analysis example JSONs pass structural validation", () => {
 	}
 });
 
-describe("Context analysis example JSONs pass structural validation", () => {
+describe("Context analysis (notification) example JSONs pass structural validation", () => {
 	const rendered = contextAnalysisSystemPrompt({});
 	const blocks = extractExampleJsonBlocks(rendered);
-
-	const validActions = ["ignore", "share", "notify", "clarify"];
 
 	it("has at least 3 example blocks", () => {
 		expect(blocks.length).toBeGreaterThanOrEqual(3);
 	});
 
 	for (let i = 0; i < blocks.length; i++) {
-		it(`example ${i + 1} passes ContextAnalysis validation`, () => {
+		it(`example ${i + 1} passes NotificationDecision validation`, () => {
 			const obj = JSON.parse(blocks[i]!);
 
-			expect(typeof obj.action).toBe("string");
-			expect(validActions).toContain(obj.action);
+			expect(typeof obj.shouldNotify).toBe("boolean");
 			expect(typeof obj.reasoning).toBe("string");
 			expect(obj.reasoning.length).toBeGreaterThan(0);
-			expect(typeof obj.significance).toBe("number");
-			expect(obj.significance).toBeGreaterThanOrEqual(0);
-			expect(obj.significance).toBeLessThanOrEqual(1);
 
-			if (obj.action === "share") {
-				expect(typeof obj.targetAgentId).toBe("string");
-				expect(obj.targetAgentId.length).toBeGreaterThan(0);
-				expect(typeof obj.content).toBe("string");
-				expect(obj.content.length).toBeGreaterThan(0);
+			if (obj.shouldNotify) {
+				expect(typeof obj.message).toBe("string");
+				expect(obj.message.length).toBeGreaterThan(0);
 			}
+		});
+	}
+});
 
-			if (obj.action === "notify") {
-				expect(typeof obj.content).toBe("string");
-				expect(obj.content.length).toBeGreaterThan(0);
+describe("Sharing analysis example JSONs pass structural validation", () => {
+	const rendered = sharingAnalysisSystemPrompt({});
+	const blocks = extractExampleJsonBlocks(rendered);
+
+	it("has at least 3 example blocks", () => {
+		expect(blocks.length).toBeGreaterThanOrEqual(3);
+	});
+
+	for (let i = 0; i < blocks.length; i++) {
+		it(`example ${i + 1} passes SharingDecision validation`, () => {
+			const obj = JSON.parse(blocks[i]!);
+
+			expect(Array.isArray(obj.decisions)).toBe(true);
+
+			for (const decision of obj.decisions) {
+				expect(typeof decision.targetAgentId).toBe("string");
+				expect(decision.targetAgentId.length).toBeGreaterThan(0);
+				expect(typeof decision.shouldShare).toBe("boolean");
+				expect(typeof decision.reasoning).toBe("string");
+				expect(decision.reasoning.length).toBeGreaterThan(0);
+
+				if (decision.shouldShare) {
+					expect(typeof decision.information).toBe("string");
+					expect(decision.information.length).toBeGreaterThan(0);
+				}
 			}
 		});
 	}
@@ -873,19 +932,52 @@ describe("Non-regression — existing prompt content preserved", () => {
 		});
 	});
 
-	describe("Context analysis system prompt", () => {
+	describe("Context analysis system prompt (notifications)", () => {
 		const rendered = contextAnalysisSystemPrompt({});
 
-		it("still contains action definitions", () => {
-			expect(rendered).toContain("## Actions");
-			expect(rendered).toContain("- **ignore**:");
-			expect(rendered).toContain("- **share**:");
-			expect(rendered).toContain("- **notify**:");
-			expect(rendered).toContain("- **clarify**:");
+		it("is specialized for notifications", () => {
+			expect(rendered).toContain("notification evaluator");
+			expect(rendered).toContain("## Guiding Principle: Silence by Default");
+		});
+
+		it("does not contain share or clarify as actions", () => {
+			expect(rendered).not.toContain('"action": "share"');
+			expect(rendered).not.toContain('"action": "clarify"');
 		});
 
 		it("still contains JSON Output section", () => {
 			expect(rendered).toContain("## JSON Output");
+		});
+
+		it("uses shouldNotify format", () => {
+			expect(rendered).toContain('"shouldNotify"');
+		});
+	});
+
+	describe("Sharing analysis system prompt", () => {
+		const rendered = sharingAnalysisSystemPrompt({});
+
+		it("is specialized for cross-agent sharing", () => {
+			expect(rendered).toContain("cross-agent information sharing specialist");
+		});
+
+		it("contains dependency type instructions", () => {
+			expect(rendered).toContain("## Dependency types");
+			expect(rendered).toContain("**blocking**");
+			expect(rendered).toContain("**informational**");
+		});
+
+		it("contains deduplication instructions", () => {
+			expect(rendered).toContain("previouslyShared");
+		});
+
+		it("does not contain notify or clarify as actions", () => {
+			expect(rendered).not.toContain('"shouldNotify"');
+			expect(rendered).not.toContain('"action": "clarify"');
+		});
+
+		it("still contains JSON Output Format section", () => {
+			expect(rendered).toContain("## JSON Output Format");
 		});
 	});
 
@@ -937,11 +1029,16 @@ describe("Contrastive example patterns", () => {
 		expect(rendered).toContain('"shouldNotify": false');
 	});
 
-	it("context analysis has ignore, share, and notify examples", () => {
+	it("context analysis (notifications) has both notify and don't-notify examples", () => {
 		const rendered = contextAnalysisSystemPrompt({});
-		expect(rendered).toContain('"action": "ignore"');
-		expect(rendered).toContain('"action": "share"');
-		expect(rendered).toContain('"action": "notify"');
+		expect(rendered).toContain('"shouldNotify": true');
+		expect(rendered).toContain('"shouldNotify": false');
+	});
+
+	it("sharing analysis has both share and don't-share examples", () => {
+		const rendered = sharingAnalysisSystemPrompt({});
+		expect(rendered).toContain('"shouldShare": true');
+		expect(rendered).toContain('"shouldShare": false');
 	});
 
 	it("summary has success and partial failure examples", () => {
@@ -971,7 +1068,11 @@ describe("Example blocks use clear delimiters", () => {
 			text: notificationDecisionPrompt(mockNotificationData),
 		},
 		{ name: "intent analysis", text: intentAnalysisSystemPrompt({}) },
-		{ name: "context analysis", text: contextAnalysisSystemPrompt({}) },
+		{
+			name: "context analysis (notifications)",
+			text: contextAnalysisSystemPrompt({}),
+		},
+		{ name: "sharing analysis", text: sharingAnalysisSystemPrompt({}) },
 		{ name: "summary", text: summarySystemPrompt({}) },
 	];
 

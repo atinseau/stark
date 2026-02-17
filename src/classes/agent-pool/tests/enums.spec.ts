@@ -38,6 +38,9 @@ describe("Pool Enums", () => {
 		expect(ConversationRole.CONTEXT_ANALYZER as string).toBe(
 			"context-analyzer",
 		);
+		expect(ConversationRole.SHARING_ANALYZER as string).toBe(
+			"sharing-analyzer",
+		);
 		expect(ConversationRole.USER_INTERACTION as string).toBe(
 			"user-interaction",
 		);

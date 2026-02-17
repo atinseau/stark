@@ -2,6 +2,7 @@ export { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 export {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
+	sharingAnalysisSystemPrompt,
 } from "./context-analysis.ts";
 export {
 	intentAnalysisPrompt,
@@ -18,6 +19,7 @@ import { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 import {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
+	sharingAnalysisSystemPrompt,
 } from "./context-analysis.ts";
 import {
 	intentAnalysisPrompt,
@@ -40,9 +42,12 @@ export const templates = {
 	planningSystem: planningSystemPrompt,
 	taskAnalysis: taskAnalysisPrompt,
 
-	// Context analysis
+	// Context analysis (notifications)
 	contextAnalysisSystem: contextAnalysisSystemPrompt,
 	contextAnalysis: contextAnalysisPrompt,
+
+	// Sharing analysis (cross-agent)
+	sharingAnalysisSystem: sharingAnalysisSystemPrompt,
 
 	// Information sharing
 	sharingDecision: sharingDecisionPrompt,

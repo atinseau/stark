@@ -9,6 +9,7 @@ import {
 	intentAnalysisPrompt,
 	intentAnalysisSystemPrompt,
 	notificationDecisionPrompt,
+	sharingAnalysisSystemPrompt,
 } from "../../../prompts/index.ts";
 import type {
 	IntentAnalysis,
@@ -101,31 +102,42 @@ function validateNotificationDecision(
 	};
 }
 
-function validateContextAnalysis(data: unknown): {
-	action: string;
-	reasoning: string;
-	significance: number;
-	targetAgentId?: string;
-	content?: string;
+function validateSharingAnalysis(data: unknown): {
+	decisions: Array<{
+		targetAgentId: string;
+		shouldShare: boolean;
+		reasoning: string;
+		information: string;
+	}>;
 } | null {
 	if (data == null || typeof data !== "object") return null;
 	const obj = data as Record<string, unknown>;
 
-	const validActions = ["ignore", "share", "notify", "clarify"];
-	if (typeof obj.action !== "string" || !validActions.includes(obj.action))
-		return null;
-	if (typeof obj.reasoning !== "string" || obj.reasoning.length === 0)
-		return null;
-	if (typeof obj.significance !== "number") return null;
+	if (!Array.isArray(obj.decisions)) return null;
 
-	return {
-		action: obj.action,
-		reasoning: obj.reasoning as string,
-		significance: Math.max(0, Math.min(1, obj.significance)),
-		targetAgentId:
-			typeof obj.targetAgentId === "string" ? obj.targetAgentId : undefined,
-		content: typeof obj.content === "string" ? obj.content : undefined,
-	};
+	const decisions: Array<{
+		targetAgentId: string;
+		shouldShare: boolean;
+		reasoning: string;
+		information: string;
+	}> = [];
+
+	for (const d of obj.decisions) {
+		if (d == null || typeof d !== "object") return null;
+		const dec = d as Record<string, unknown>;
+		if (typeof dec.targetAgentId !== "string") return null;
+		if (typeof dec.shouldShare !== "boolean") return null;
+		if (typeof dec.reasoning !== "string") return null;
+		if (typeof dec.information !== "string") return null;
+		decisions.push({
+			targetAgentId: dec.targetAgentId,
+			shouldShare: dec.shouldShare,
+			reasoning: dec.reasoning,
+			information: dec.information,
+		});
+	}
+
+	return { decisions };
 }
 
 // ── Semantic validation helper (mirrors TaskPlanner internals) ─────────────
@@ -870,7 +882,7 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 
 	describe("context analysis — few-shot examples guide action selection", () => {
 		it.concurrent(
-			"routine delta → action: ignore with low significance",
+			"routine delta → shouldNotify: false (notification path)",
 			async () => {
 				const conversations = createConversationManager();
 				conversations.register(
@@ -907,23 +919,22 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 				const result = await conversations.sendOneShotJson(
 					ConversationRole.CONTEXT_ANALYZER,
 					prompt,
-					validateContextAnalysis,
+					validateNotificationDecision,
 					{ maxTokens: 300 },
 				);
 
-				expect(result.action).toBe("ignore");
-				expect(result.significance).toBeLessThanOrEqual(0.3);
+				expect(result.shouldNotify).toBe(false);
 			},
 			INT_TIMEOUT_MS,
 		);
 
 		it.concurrent(
-			"relevant output with dependent agent → action: share",
+			"relevant output with dependent agent → shouldShare: true (sharing path)",
 			async () => {
 				const conversations = createConversationManager();
 				conversations.register(
-					ConversationRole.CONTEXT_ANALYZER,
-					contextAnalysisSystemPrompt({}),
+					ConversationRole.SHARING_ANALYZER,
+					sharingAnalysisSystemPrompt({}),
 				);
 
 				const { contextAnalysisPrompt } = await import(
@@ -971,23 +982,25 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 				});
 
 				const result = await conversations.sendOneShotJson(
-					ConversationRole.CONTEXT_ANALYZER,
+					ConversationRole.SHARING_ANALYZER,
 					prompt,
-					validateContextAnalysis,
-					{ maxTokens: 300 },
+					validateSharingAnalysis,
+					{ maxTokens: 500 },
 				);
 
-				expect(result.action).toBe("share");
-				expect(result.significance).toBeGreaterThanOrEqual(0.6);
-				expect(result.targetAgentId).toBeDefined();
-				expect(result.content).toBeDefined();
-				expect(result.content!.length).toBeGreaterThan(10);
+				expect(result.decisions.length).toBeGreaterThanOrEqual(1);
+				const targetDecision = result.decisions.find(
+					(d) => d.targetAgentId === "agent-test-writer-id",
+				);
+				expect(targetDecision).toBeDefined();
+				expect(targetDecision!.shouldShare).toBe(true);
+				expect(targetDecision!.information.length).toBeGreaterThan(10);
 			},
 			INT_TIMEOUT_MS,
 		);
 
 		it.concurrent(
-			"critical error → action: notify with high significance",
+			"critical error → shouldNotify: true with actionable message (notification path)",
 			async () => {
 				const conversations = createConversationManager();
 				conversations.register(
@@ -1028,14 +1041,12 @@ describe.skipIf(!HAS_API_KEY)("Few-shot examples — integration", () => {
 				const result = await conversations.sendOneShotJson(
 					ConversationRole.CONTEXT_ANALYZER,
 					prompt,
-					validateContextAnalysis,
+					validateNotificationDecision,
 					{ maxTokens: 300 },
 				);
 
-				expect(result.action).toBe("notify");
-				expect(result.significance).toBeGreaterThanOrEqual(0.8);
-				expect(result.content).toBeDefined();
-				expect(result.content!.length).toBeGreaterThan(10);
+				expect(result.shouldNotify).toBe(true);
+				expect(result.message.length).toBeGreaterThan(10);
 			},
 			INT_TIMEOUT_MS,
 		);
