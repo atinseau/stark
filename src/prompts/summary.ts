@@ -84,6 +84,8 @@ const SUMMARY_SOURCE = `Summarize this task execution.
 - **Sharing evaluations**: {{coordination.sharingEvaluationCount}}
 - **Information shared**: {{coordination.sharingApprovedCount}} time(s)
 - **User notifications**: {{coordination.notificationCount}}
+{{#if (gt coordination.retryCount 0)}}- **Retries**: {{coordination.retryCount}} subtask(s) retried{{/if}}
+{{#if (gt coordination.timeoutCount 0)}}- **Timeouts**: {{coordination.timeoutCount}} subtask(s) timed out{{/if}}
 {{#if coordination.sharingSummaries.length}}
 
 ### Information Flow

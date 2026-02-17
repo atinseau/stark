@@ -275,6 +275,25 @@ export class ContextTracker {
 		state.status = AgentStatus.ERROR;
 	}
 
+	/**
+	 * Marks an agent as timed out.
+	 *
+	 * Similar to `markFailed()` but records the timeout specifically
+	 * so it can be distinguished from other failures in logs and events.
+	 *
+	 * @param agentId - The agent that timed out.
+	 * @param timeoutMs - The timeout duration that was exceeded.
+	 * @param elapsedMs - The actual elapsed time before timeout was triggered.
+	 */
+	markTimedOut(agentId: string, timeoutMs: number, elapsedMs: number): void {
+		const state = this.agents.get(agentId);
+		if (!state) return;
+
+		state.completed = true;
+		state.error = `Timed out after ${elapsedMs}ms (limit: ${timeoutMs}ms)`;
+		state.status = AgentStatus.ERROR;
+	}
+
 	// ── Query ──────────────────────────────────────────────────────────
 
 	/**

@@ -294,6 +294,8 @@ describe("Summary prompt — coordination stats included", () => {
 		sharingEvaluationCount: 8,
 		sharingApprovedCount: 3,
 		notificationCount: 2,
+		retryCount: 0,
+		timeoutCount: 0,
 		sharingSummaries: [
 			{
 				sourceAgentName: "api-dev",
@@ -400,6 +402,8 @@ describe("Summary prompt — sharingSummaries format", () => {
 			sharingEvaluationCount: 3,
 			sharingApprovedCount: 1,
 			notificationCount: 0,
+			retryCount: 0,
+			timeoutCount: 0,
 			sharingSummaries: [
 				{
 					sourceAgentName: "api-dev",
@@ -421,6 +425,8 @@ describe("Summary prompt — sharingSummaries format", () => {
 			sharingEvaluationCount: 3,
 			sharingApprovedCount: 0,
 			notificationCount: 0,
+			retryCount: 0,
+			timeoutCount: 0,
 			sharingSummaries: [],
 		};
 
@@ -580,6 +586,8 @@ describe("CoordinationStats — type structure", () => {
 			sharingEvaluationCount: 5,
 			sharingApprovedCount: 2,
 			notificationCount: 1,
+			retryCount: 0,
+			timeoutCount: 0,
 			sharingSummaries: [
 				{
 					sourceAgentName: "src",
@@ -603,6 +611,8 @@ describe("CoordinationStats — type structure", () => {
 			sharingEvaluationCount: 0,
 			sharingApprovedCount: 0,
 			notificationCount: 0,
+			retryCount: 0,
+			timeoutCount: 0,
 			sharingSummaries: [],
 		};
 
@@ -714,6 +724,8 @@ describe("Summary prompt — multiple sharing summaries", () => {
 			sharingEvaluationCount: 10,
 			sharingApprovedCount: 3,
 			notificationCount: 1,
+			retryCount: 0,
+			timeoutCount: 0,
 			sharingSummaries: [
 				{
 					sourceAgentName: "agent-a",

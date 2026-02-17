@@ -46,6 +46,23 @@ export enum PoolEvent {
 	DESTROYED = "pool:destroyed",
 
 	/**
+	 * An agent exceeded its subtask timeout and was destroyed.
+	 *
+	 * Emitted before a retry attempt (if configured) or before
+	 * marking the subtask as failed.
+	 */
+	AGENT_TIMEOUT = "pool:agent-timeout",
+
+	/**
+	 * A failed subtask is being retried with a fresh agent.
+	 *
+	 * Emitted when a subtask that failed (error or timeout) is
+	 * about to be retried. The payload includes the attempt number
+	 * and the error from the previous attempt.
+	 */
+	AGENT_RETRY = "pool:agent-retry",
+
+	/**
 	 * An agent in the pool requires user approval to proceed with a tool call.
 	 *
 	 * Only emitted when `agentConfig.autoApprove` is `false`. The event

@@ -81,6 +81,31 @@ export function toErrorMessage(error: unknown, maxLength = 500): string {
 	return String(error);
 }
 
+// ── Subtask Timeout Error ──────────────────────────────────────────────────
+
+/**
+ * Thrown when a subtask exceeds its configured timeout.
+ *
+ * Distinguished from other errors so the retry logic can check
+ * `retryOnTimeout` configuration.
+ */
+export class SubtaskTimeoutError extends Error {
+	readonly isTimeout = true;
+
+	constructor(
+		readonly agentName: string,
+		readonly subtaskId: string,
+		readonly timeoutMs: number,
+		readonly elapsedMs: number,
+	) {
+		super(
+			`Subtask "${subtaskId}" (agent: ${agentName}) timed out ` +
+				`after ${elapsedMs}ms (limit: ${timeoutMs}ms)`,
+		);
+		this.name = "SubtaskTimeoutError";
+	}
+}
+
 /**
  * Wrap any thrown value into a proper `Error` instance.
  *

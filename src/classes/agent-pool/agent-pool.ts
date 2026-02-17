@@ -9,6 +9,7 @@ import { ConversationRole } from "../../enums/conversation-role.enum.ts";
 import { DeltaType } from "../../enums/delta-type.enum.ts";
 import { ExecutionStrategy } from "../../enums/execution-strategy.enum.ts";
 import { PoolEvent } from "../../enums/pool-event.enum.ts";
+import type { TaskComplexity } from "../../enums/task-complexity.enum.ts";
 
 import { UserIntent } from "../../enums/user-intent.enum.ts";
 import { createLogger } from "../../logger/create-logger.ts";
@@ -20,7 +21,11 @@ import {
 	summaryPrompt,
 	summarySystemPrompt,
 } from "../../prompts/index.ts";
-import type { AgentConfig, LogOutputConfig } from "../../types/agent.types.ts";
+import type {
+	AgentConfig,
+	LogOutputConfig,
+	PromptResult,
+} from "../../types/agent.types.ts";
 import type {
 	AgentExecutionResult,
 	AgentFactory,
@@ -29,6 +34,7 @@ import type {
 	AgentPoolState,
 	BasePoolEvent,
 	ContextDelta,
+	ContextEvent,
 	CoordinationStats,
 	IntentAnalysis,
 	NotificationPreference,
@@ -39,13 +45,14 @@ import type {
 	SignificanceContext,
 	StructuredContextInjection,
 	SubTask,
+	SubtaskRetryConfig,
 	TaskAnalysis,
 } from "../../types/agent-pool.types.ts";
 import {
 	ContextInjectionCategory,
 	ContextInjectionPriority,
 } from "../../types/agent-pool.types.ts";
-import { toErrorMessage } from "../../utils/errors.ts";
+import { SubtaskTimeoutError, toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import { generateIdentity } from "../../utils/identity.ts";
 import { Agent } from "../agent/agent.ts";
@@ -262,6 +269,12 @@ export class AgentPool extends EventEmitter {
 
 	/** Whether the pool has been destroyed. */
 	private _destroyed = false;
+
+	/** Running count of subtask retries performed during current execution. */
+	private _retryCount = 0;
+
+	/** Running count of subtask timeouts triggered during current execution. */
+	private _timeoutCount = 0;
 
 	// ── Constructor ────────────────────────────────────────────────────
 
@@ -490,6 +503,8 @@ export class AgentPool extends EventEmitter {
 							sharingApprovedCount: this.informationBroker.shareCount,
 							notificationCount: this.notificationEngine.notificationCount,
 							sharingSummaries: this.buildSharingSummaries(),
+							retryCount: this._retryCount,
+							timeoutCount: this._timeoutCount,
 						}
 					: undefined;
 
@@ -557,6 +572,8 @@ export class AgentPool extends EventEmitter {
 			this._deltaCount = 0;
 			this._sharingDecisionCount = 0;
 			this._sharingSummaries = [];
+			this._retryCount = 0;
+			this._timeoutCount = 0;
 		}
 	}
 
@@ -734,6 +751,8 @@ export class AgentPool extends EventEmitter {
 			notificationsEnabled: this.notificationEngine.isEnabled,
 			deltaCount: this._deltaCount,
 			sharingDecisionCount: this._sharingDecisionCount,
+			retryCount: this._retryCount,
+			timeoutCount: this._timeoutCount,
 			pendingApprovals: this.approvalManager.getPendingSummary(),
 		};
 	}
@@ -1127,23 +1146,18 @@ export class AgentPool extends EventEmitter {
 							entry.agent.id,
 							"Deadlocked: blocking dependencies could not be satisfied",
 						);
-						results.push({
-							agentId: entry.agent.id,
-							agentName: entry.agent.name,
-							subtask: entry.subtask,
-							promptResult: {
-								stopReason: "error" as StopReason,
-								text: "",
-								usage: null,
-							},
-							events:
-								this.contextTracker.getAgentState(entry.agent.id)?.events ?? [],
-							filesWritten:
-								this.contextTracker.getAgentState(entry.agent.id)
-									?.filesWritten ?? [],
-							success: false,
-							error: "Deadlocked: blocking dependencies could not be satisfied",
-						});
+						results.push(
+							this.buildFailedResult(
+								entry.agent,
+								entry.subtask,
+								"Deadlocked: blocking dependencies could not be satisfied",
+								0,
+								false,
+								0,
+								this.contextTracker.getAgentState(entry.agent.id)?.events,
+								this.contextTracker.getAgentState(entry.agent.id)?.filesWritten,
+							),
+						);
 					}
 				}
 				break;
@@ -1175,116 +1189,65 @@ export class AgentPool extends EventEmitter {
 					failed.add(subtaskId);
 					inProgress.delete(subtaskId);
 
-					results.push({
-						agentId: agent.id,
-						agentName: agent.name,
-						subtask,
-						promptResult: {
-							stopReason: "error" as StopReason,
-							text: "",
-							usage: null,
-						},
-						events: agentState.events,
-						filesWritten: agentState.filesWritten,
-						success: false,
-						error: agentState.error,
-					});
+					results.push(
+						this.buildFailedResult(
+							agent,
+							subtask,
+							agentState.error,
+							0,
+							false,
+							0,
+							agentState.events,
+							agentState.filesWritten,
+						),
+					);
 					return;
 				}
 
-				try {
-					this.logger.info(
-						{
-							agentId: agent.id,
-							subtaskId,
-							role: subtask.role,
-						},
-						`Executing subtask: ${subtask.role}`,
-					);
+				this.logger.info(
+					{
+						agentId: agent.id,
+						subtaskId,
+						role: subtask.role,
+					},
+					`Executing subtask: ${subtask.role}`,
+				);
 
-					const promptResult = await agent.prompt(subtask.prompt);
+				// Use executeSubtaskWithRetry instead of direct prompt
+				const executionResult = await this.executeSubtaskWithRetry(
+					subtask,
+					agent,
+					analysis,
+					agents,
+				);
 
-					this.contextTracker.recordPromptResult(agent.id, promptResult);
-					this.contextTracker.markCompleted(agent.id);
+				results.push(executionResult);
 
+				if (executionResult.success) {
 					completed.add(subtaskId);
-					inProgress.delete(subtaskId);
+				} else {
+					failed.add(subtaskId);
+				}
+				inProgress.delete(subtaskId);
 
-					const finalState = this.contextTracker.getAgentState(agent.id);
+				// Store in managed agents map
+				const managedEntry = this.managedAgents.get(executionResult.agentId);
+				if (managedEntry) {
+					managedEntry.result = executionResult;
+				}
 
-					const executionResult: AgentExecutionResult = {
-						agentId: agent.id,
-						agentName: agent.name,
-						subtask,
-						promptResult,
-						events: finalState?.events ?? [],
-						filesWritten: finalState?.filesWritten ?? [],
-						success: true,
-					};
-
-					results.push(executionResult);
-
-					// Store in managed agents map
-					const managedEntry = this.managedAgents.get(agent.id);
-					if (managedEntry) {
-						managedEntry.result = executionResult;
-					}
-
+				if (executionResult.success) {
 					this.emitPoolEvent(PoolEvent.AGENT_COMPLETED, {
-						agentId: agent.id,
-						agentName: agent.name,
+						agentId: executionResult.agentId,
+						agentName: executionResult.agentName,
 						result: executionResult,
 					});
-
-					this.logger.info(
-						{
-							agentId: agent.id,
-							subtaskId,
-							role: subtask.role,
-							responseLength: promptResult.text.length,
-							stopReason: promptResult.stopReason,
-						},
-						`Subtask completed: ${subtask.role}`,
-					);
-				} catch (error) {
-					const errorMessage = toErrorMessage(error);
-
-					this.contextTracker.markFailed(agent.id, errorMessage);
-
-					failed.add(subtaskId);
-					inProgress.delete(subtaskId);
-
-					const finalState = this.contextTracker.getAgentState(agent.id);
-
-					results.push({
-						agentId: agent.id,
-						agentName: agent.name,
-						subtask,
-						promptResult: {
-							stopReason: "error" as StopReason,
-							text: "",
-							usage: null,
-						},
-						events: finalState?.events ?? [],
-						filesWritten: finalState?.filesWritten ?? [],
-						success: false,
-						error: errorMessage,
-					});
-
+				} else {
 					this.emitPoolEvent(PoolEvent.AGENT_ERROR, {
-						agentId: agent.id,
-						agentName: agent.name,
-						error: errorMessage,
+						agentId: executionResult.agentId,
+						agentName: executionResult.agentName,
+						error: executionResult.error ?? "unknown",
 					});
-
-					this.logger.error(
-						{
-							agentId: agent.id,
-							subtaskId,
-							error: errorMessage,
-						},
-						`Subtask failed: ${subtask.role}`,
-					);
 				}
 			});
 
@@ -1292,6 +1255,431 @@ export class AgentPool extends EventEmitter {
 		}
 
 		return results;
+	}
+
+	// ── Private: Timeout Wrapper ───────────────────────────────────────
+
+	/**
+	 * Executes a subtask prompt with an optional timeout.
+	 *
+	 * If the timeout is reached, the agent is destroyed (to stop any
+	 * in-flight tool calls) and a SubtaskTimeoutError is thrown. The caller
+	 * is responsible for handling the error (retry or mark as failed).
+	 *
+	 * @param agent - The agent to prompt.
+	 * @param prompt - The prompt text.
+	 * @param timeoutMs - The timeout in milliseconds. 0 or Infinity disables.
+	 * @param subtaskId - The subtask ID (for logging/events).
+	 * @returns The prompt result.
+	 * @throws SubtaskTimeoutError if the timeout is exceeded.
+	 * @throws Any error from the underlying agent.prompt() call.
+	 */
+	private async executeWithTimeout(
+		agent: PoolManagedAgent,
+		prompt: string,
+		timeoutMs: number,
+		subtaskId: string,
+	): Promise<PromptResult> {
+		// No timeout — just call prompt directly
+		if (!timeoutMs || timeoutMs === Infinity || timeoutMs <= 0) {
+			return agent.prompt(prompt);
+		}
+
+		const startTime = Date.now();
+
+		// Create a timeout promise that rejects after the specified duration
+		let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			timeoutHandle = setTimeout(() => {
+				const elapsed = Date.now() - startTime;
+
+				this.logger.warn(
+					{
+						agentId: agent.id,
+						agentName: agent.name,
+						subtaskId,
+						timeoutMs,
+						elapsedMs: elapsed,
+					},
+					`Subtask timed out after ${elapsed}ms (limit: ${timeoutMs}ms)`,
+				);
+
+				this._timeoutCount++;
+
+				this.contextTracker.markTimedOut(agent.id, timeoutMs, elapsed);
+
+				this.emitPoolEvent(PoolEvent.AGENT_TIMEOUT, {
+					agentId: agent.id,
+					agentName: agent.name,
+					subtaskId,
+					timeoutMs,
+					elapsedMs: elapsed,
+				});
+
+				// Destroy the agent to stop in-flight operations
+				agent.destroy().catch((err) => {
+					this.logger.warn(
+						{ agentId: agent.id, error: toErrorMessage(err) },
+						"Failed to destroy timed-out agent",
+					);
+				});
+
+				reject(
+					new SubtaskTimeoutError(agent.name, subtaskId, timeoutMs, elapsed),
+				);
+			}, timeoutMs);
+		});
+
+		try {
+			// Race the prompt against the timeout
+			const result = await Promise.race([agent.prompt(prompt), timeoutPromise]);
+
+			return result;
+		} finally {
+			// Always clear the timeout to prevent leaks
+			if (timeoutHandle) {
+				clearTimeout(timeoutHandle);
+			}
+		}
+	}
+
+	// ── Private: Retry Logic ───────────────────────────────────────────
+
+	/**
+	 * Executes a single subtask with retry support.
+	 *
+	 * On failure, if retries are configured and the error is eligible:
+	 * 1. The failed agent is destroyed
+	 * 2. A new agent is spawned for the same subtask
+	 * 3. The prompt is augmented with error context from the previous attempt
+	 * 4. The subtask is re-executed
+	 *
+	 * @param subtask - The subtask to execute.
+	 * @param agent - The initial agent (may be replaced on retry).
+	 * @param analysis - The full task analysis (for dependency context).
+	 * @param agents - The agents map (updated on retry with the new agent).
+	 * @returns The execution result.
+	 */
+	private async executeSubtaskWithRetry(
+		subtask: SubTask,
+		agent: PoolManagedAgent,
+		analysis: TaskAnalysis,
+		agents: Map<string, { agent: PoolManagedAgent; subtask: SubTask }>,
+	): Promise<AgentExecutionResult> {
+		const retryConfig = this.resolveRetryConfig();
+		const timeoutMs = this.resolveTimeoutMs(analysis.complexity);
+
+		let currentAgent = agent;
+		let lastError: string | null = null;
+		let retryCount = 0;
+		let timedOut = false;
+
+		for (let attempt = 0; attempt <= retryConfig.maxRetries; attempt++) {
+			const isRetry = attempt > 0;
+			const subtaskStartTime = Date.now();
+
+			if (isRetry) {
+				this._retryCount++;
+
+				this.logger.info(
+					{
+						subtaskId: subtask.id,
+						attempt: attempt + 1,
+						maxAttempts: retryConfig.maxRetries + 1,
+						previousError: lastError,
+					},
+					`Retrying subtask ${subtask.role} (attempt ${attempt + 1}/${retryConfig.maxRetries + 1})`,
+				);
+
+				this.emitPoolEvent(PoolEvent.AGENT_RETRY, {
+					agentId: currentAgent.id,
+					agentName: currentAgent.name,
+					subtaskId: subtask.id,
+					attempt,
+					maxRetries: retryConfig.maxRetries,
+					previousError: lastError ?? "unknown",
+				});
+
+				// Wait before retrying
+				if (retryConfig.retryDelayMs > 0) {
+					await new Promise((resolve) =>
+						setTimeout(resolve, retryConfig.retryDelayMs),
+					);
+				}
+
+				// Spawn a fresh agent for the retry
+				try {
+					currentAgent = await this.spawnRetryAgent(subtask);
+
+					// Update the agents map with the new agent
+					agents.set(subtask.id, { agent: currentAgent, subtask });
+				} catch (spawnError) {
+					const errorMsg = toErrorMessage(spawnError);
+					this.logger.error(
+						{ subtaskId: subtask.id, error: errorMsg },
+						"Failed to spawn retry agent — giving up",
+					);
+					return this.buildFailedResult(
+						currentAgent,
+						subtask,
+						errorMsg,
+						retryCount,
+						false,
+						0,
+					);
+				}
+			}
+
+			// Build the prompt (with error context if retrying)
+			const prompt =
+				isRetry && retryConfig.includeErrorContext
+					? this.buildRetryPrompt(subtask, lastError, attempt)
+					: subtask.prompt;
+
+			try {
+				const promptResult = await this.executeWithTimeout(
+					currentAgent,
+					prompt,
+					timeoutMs,
+					subtask.id,
+				);
+
+				const subtaskDuration = Date.now() - subtaskStartTime;
+
+				this.contextTracker.recordPromptResult(currentAgent.id, promptResult);
+				this.contextTracker.markCompleted(currentAgent.id);
+
+				const finalState = this.contextTracker.getAgentState(currentAgent.id);
+
+				return {
+					agentId: currentAgent.id,
+					agentName: currentAgent.name,
+					subtask,
+					promptResult,
+					events: finalState?.events ?? [],
+					filesWritten: finalState?.filesWritten ?? [],
+					success: true,
+					retryCount,
+					timedOut: false,
+					subtaskDurationMs: subtaskDuration,
+				};
+			} catch (error) {
+				const errorMessage = toErrorMessage(error);
+				const isTimeoutError = error instanceof SubtaskTimeoutError;
+				timedOut = isTimeoutError;
+				lastError = errorMessage;
+				retryCount = attempt + 1;
+
+				this.logger.warn(
+					{
+						subtaskId: subtask.id,
+						attempt: attempt + 1,
+						isTimeout: isTimeoutError,
+						error: errorMessage,
+					},
+					`Subtask attempt ${attempt + 1} failed: ${errorMessage}`,
+				);
+
+				// Check if we should retry
+				const canRetry = attempt < retryConfig.maxRetries;
+				const shouldRetryTimeout = isTimeoutError && retryConfig.retryOnTimeout;
+				const shouldRetry = canRetry && (shouldRetryTimeout || !isTimeoutError);
+
+				if (!shouldRetry) {
+					// No more retries — mark as failed
+					this.contextTracker.markFailed(currentAgent.id, errorMessage);
+
+					const subtaskDuration = Date.now() - subtaskStartTime;
+					const finalState = this.contextTracker.getAgentState(currentAgent.id);
+
+					return this.buildFailedResult(
+						currentAgent,
+						subtask,
+						errorMessage,
+						retryCount,
+						isTimeoutError,
+						subtaskDuration,
+						finalState?.events,
+						finalState?.filesWritten,
+					);
+				}
+
+				// Destroy the current agent before retrying
+				if (currentAgent.status !== AgentStatus.DESTROYED) {
+					try {
+						await currentAgent.destroy();
+					} catch {
+						// Agent may already be destroyed (e.g., from timeout handler)
+					}
+				}
+			}
+		}
+
+		// Should never reach here, but safety fallback
+		return this.buildFailedResult(
+			currentAgent,
+			subtask,
+			lastError ?? "unknown",
+			retryCount,
+			timedOut,
+			0,
+		);
+	}
+
+	// ── Private: Timeout/Retry Helpers ─────────────────────────────────
+
+	/**
+	 * Resolves the effective retry configuration with defaults.
+	 */
+	private resolveRetryConfig(): Required<SubtaskRetryConfig> {
+		const userConfig = this.config.retry;
+
+		return {
+			maxRetries: userConfig?.maxRetries ?? 1,
+			includeErrorContext: userConfig?.includeErrorContext ?? true,
+			retryDelayMs: userConfig?.retryDelayMs ?? 2000,
+			retryOnTimeout: userConfig?.retryOnTimeout ?? true,
+		};
+	}
+
+	/**
+	 * Resolves the effective timeout in milliseconds for a subtask,
+	 * considering the task complexity and any complexity-specific overrides.
+	 *
+	 * @param complexity - The assessed task complexity.
+	 * @returns The timeout in milliseconds, or 0 if disabled.
+	 */
+	private resolveTimeoutMs(complexity: TaskComplexity): number {
+		const timeoutConfig = this.config.timeout;
+
+		if (!timeoutConfig) {
+			// Default timeout: 5 minutes
+			return 300_000;
+		}
+
+		if (
+			timeoutConfig.subtaskTimeoutMs === 0 ||
+			timeoutConfig.subtaskTimeoutMs === Infinity
+		) {
+			return 0; // Disabled
+		}
+
+		// Check for complexity-specific override
+		if (timeoutConfig.complexityTimeouts) {
+			const complexityKey = complexity.toLowerCase() as
+				| "simple"
+				| "moderate"
+				| "complex";
+			const override = timeoutConfig.complexityTimeouts[complexityKey];
+			if (override !== undefined) {
+				return override;
+			}
+		}
+
+		return timeoutConfig.subtaskTimeoutMs;
+	}
+
+	/**
+	 * Builds the prompt for a retry attempt, including error context
+	 * from the previous attempt.
+	 *
+	 * @param subtask - The original subtask.
+	 * @param previousError - The error message from the previous attempt.
+	 * @param attemptNumber - The retry attempt number (1-based).
+	 * @returns The augmented prompt.
+	 */
+	private buildRetryPrompt(
+		subtask: SubTask,
+		previousError: string | null,
+		attemptNumber: number,
+	): string {
+		const errorContext = previousError
+			? `\n\nThe previous attempt (#${attemptNumber}) FAILED with the following error:\n${previousError}\n\nPlease avoid the same mistake. If the previous approach didn't work, try a different strategy.`
+			: "";
+
+		return `${subtask.prompt}${errorContext}`;
+	}
+
+	/**
+	 * Spawns a fresh agent for a retry attempt.
+	 *
+	 * Creates a new agent with the same configuration as the original,
+	 * registers it with the context tracker, and wires events.
+	 *
+	 * @param subtask - The subtask to retry.
+	 * @returns The newly spawned agent.
+	 */
+	private async spawnRetryAgent(subtask: SubTask): Promise<PoolManagedAgent> {
+		const agentConfig: AgentConfig = {
+			logOutput: this.config.logOutput,
+			logLevel: this.config.logLevel,
+			cwd: this.config.cwd,
+			...this.config.agentConfig,
+			name: `${subtask.role}-retry`,
+		};
+
+		const agent = this.agentFactory(agentConfig);
+
+		// Register with context tracker
+		this.contextTracker.registerAgent(agent.id, agent.name, subtask);
+
+		// Update subtask ↔ agent mappings (the old agent's mapping is stale)
+		this.subtaskToAgent.set(subtask.id, agent.id);
+		this.agentToSubtask.set(agent.id, subtask.id);
+
+		// Wire agent events
+		this.wireAgentEvents(agent, subtask);
+
+		// Store in managed agents
+		const entry = {
+			agent,
+			subtask,
+			result: null as AgentExecutionResult | null,
+		};
+		this.managedAgents.set(agent.id, entry);
+
+		this.emitPoolEvent(PoolEvent.AGENT_SPAWNED, {
+			agentId: agent.id,
+			agentName: agent.name,
+			subtask,
+		});
+
+		// Wait for agent to be ready
+		await agent.ready;
+
+		return agent;
+	}
+
+	/**
+	 * Builds an AgentExecutionResult for a failed subtask.
+	 */
+	private buildFailedResult(
+		agent: PoolManagedAgent,
+		subtask: SubTask,
+		error: string,
+		retryCount: number,
+		timedOut: boolean,
+		subtaskDurationMs: number,
+		events?: ContextEvent[],
+		filesWritten?: string[],
+	): AgentExecutionResult {
+		return {
+			agentId: agent.id,
+			agentName: agent.name,
+			subtask,
+			promptResult: {
+				stopReason: "error" as StopReason,
+				text: "",
+				usage: null,
+			},
+			events: events ?? [],
+			filesWritten: filesWritten ?? [],
+			success: false,
+			error,
+			retryCount,
+			timedOut,
+			subtaskDurationMs,
+		};
 	}
 
 	// ── Private: Delta Handling ─────────────────────────────────────────

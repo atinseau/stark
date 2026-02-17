@@ -87,6 +87,91 @@ export interface Conversation {
 
 // ── Task Planning Types ────────────────────────────────────────────────────
 
+// ── Subtask Timeout & Retry Configuration ──────────────────────────────────
+
+/**
+ * Configuration for subtask-level timeouts.
+ *
+ * A timeout is applied to each individual subtask's `agent.prompt()` call.
+ * When a subtask exceeds its timeout, the agent is destroyed and the
+ * subtask is either retried (if retries are configured) or marked as failed.
+ */
+export interface SubtaskTimeoutConfig {
+	/**
+	 * Maximum duration (in milliseconds) for a single subtask execution.
+	 *
+	 * This includes the full `agent.prompt()` call — all tool calls,
+	 * file operations, and LLM round-trips within that prompt.
+	 *
+	 * Default: 300_000 (5 minutes).
+	 *
+	 * Set to `0` or `Infinity` to disable timeout.
+	 */
+	readonly subtaskTimeoutMs: number;
+
+	/**
+	 * Optional per-complexity timeout overrides.
+	 *
+	 * If provided, overrides `subtaskTimeoutMs` based on the assessed
+	 * task complexity from the planner. This allows giving more time
+	 * to complex subtasks without inflating the timeout for simple ones.
+	 *
+	 * If a complexity level is not specified, `subtaskTimeoutMs` is used.
+	 */
+	readonly complexityTimeouts?: {
+		readonly simple?: number;
+		readonly moderate?: number;
+		readonly complex?: number;
+	};
+}
+
+/**
+ * Configuration for subtask-level retry behavior.
+ *
+ * When a subtask fails (error or timeout), it can be retried with
+ * a fresh agent instance. The retry prompt includes the error context
+ * from the previous attempt to help the agent avoid the same mistake.
+ */
+export interface SubtaskRetryConfig {
+	/**
+	 * Maximum number of retry attempts per subtask (not counting the initial attempt).
+	 *
+	 * Default: 1 (one retry allowed, so 2 total attempts).
+	 * Set to 0 to disable retries.
+	 */
+	readonly maxRetries: number;
+
+	/**
+	 * Whether to include the error context from the previous attempt
+	 * in the retry prompt.
+	 *
+	 * When `true`, the retry prompt is augmented with:
+	 * - The error message from the previous attempt
+	 * - A summary of what the previous agent did before failing
+	 * - Instructions to avoid the same mistake
+	 *
+	 * Default: true.
+	 */
+	readonly includeErrorContext: boolean;
+
+	/**
+	 * Delay in milliseconds before retrying a failed subtask.
+	 *
+	 * Useful for transient errors (network issues, rate limiting).
+	 * Default: 2000 (2 seconds).
+	 */
+	readonly retryDelayMs: number;
+
+	/**
+	 * Whether to retry on timeout specifically (as opposed to only on errors).
+	 *
+	 * Default: true.
+	 */
+	readonly retryOnTimeout: boolean;
+}
+
+// ── Task Planning Types ────────────────────────────────────────────────────
+
 /**
  * Result of the planner's analysis of a user task.
  *
@@ -546,6 +631,12 @@ export interface CoordinationStats {
 		readonly targetAgentName: string;
 		readonly informationPreview: string;
 	}>;
+
+	/** Number of subtask retries performed. */
+	readonly retryCount: number;
+
+	/** Number of subtask timeouts triggered. */
+	readonly timeoutCount: number;
 }
 
 // ── Intent Analysis Types ──────────────────────────────────────────────────
@@ -718,6 +809,29 @@ export interface AgentPoolConfig {
 	readonly modelOverrides?: Partial<Record<ConversationRole, string>>;
 
 	/**
+	 * Subtask timeout configuration.
+	 *
+	 * When specified, each subtask execution is bounded by a timeout.
+	 * Agents that exceed the timeout are destroyed and the subtask
+	 * is either retried or marked as failed.
+	 *
+	 * Default: { subtaskTimeoutMs: 300_000 } (5 minutes).
+	 * Set `subtaskTimeoutMs: 0` or `subtaskTimeoutMs: Infinity` to disable.
+	 */
+	readonly timeout?: SubtaskTimeoutConfig;
+
+	/**
+	 * Subtask retry configuration.
+	 *
+	 * When specified, failed subtasks can be retried with fresh agent instances.
+	 * The retry prompt includes error context from the previous attempt.
+	 *
+	 * Default: { maxRetries: 1, includeErrorContext: true, retryDelayMs: 2000, retryOnTimeout: true }.
+	 * Set `maxRetries: 0` to disable retries.
+	 */
+	readonly retry?: SubtaskRetryConfig;
+
+	/**
 	 * Optional factory function for creating agents.
 	 *
 	 * When provided, the pool uses this factory instead of directly
@@ -820,6 +934,24 @@ export interface AgentExecutionResult {
 
 	/** Error message if the agent failed. */
 	readonly error?: string;
+
+	/**
+	 * Number of retry attempts made for this subtask.
+	 * 0 means the subtask succeeded (or failed) on the first attempt.
+	 */
+	readonly retryCount: number;
+
+	/**
+	 * Whether this subtask was terminated due to a timeout.
+	 * `true` means the agent exceeded the configured timeout and was destroyed.
+	 */
+	readonly timedOut: boolean;
+
+	/**
+	 * Duration in milliseconds for this subtask's execution
+	 * (last attempt only — does not include retry delays).
+	 */
+	readonly subtaskDurationMs: number;
 }
 
 // ── Pool State ─────────────────────────────────────────────────────────────
@@ -857,6 +989,12 @@ export interface AgentPoolState {
 
 	/** Total sharing decisions made. */
 	readonly sharingDecisionCount: number;
+
+	/** Number of subtask retries performed during current execution. */
+	readonly retryCount: number;
+
+	/** Number of subtask timeouts triggered during current execution. */
+	readonly timeoutCount: number;
 
 	/**
 	 * Pending approval requests from agents waiting for user authorization.
@@ -955,6 +1093,25 @@ export interface PoolDestroyedEvent extends BasePoolEvent {
 	readonly event: PoolEvent.DESTROYED;
 }
 
+export interface AgentTimeoutEvent extends BasePoolEvent {
+	readonly event: PoolEvent.AGENT_TIMEOUT;
+	readonly agentId: string;
+	readonly agentName: string;
+	readonly subtaskId: string;
+	readonly timeoutMs: number;
+	readonly elapsedMs: number;
+}
+
+export interface AgentRetryEvent extends BasePoolEvent {
+	readonly event: PoolEvent.AGENT_RETRY;
+	readonly agentId: string;
+	readonly agentName: string;
+	readonly subtaskId: string;
+	readonly attempt: number;
+	readonly maxRetries: number;
+	readonly previousError: string;
+}
+
 /**
  * Emitted when an agent requires user approval to proceed with a tool call.
  *
@@ -991,6 +1148,8 @@ export interface PoolEventMap {
 	[PoolEvent.AGENT_SPAWNED]: AgentSpawnedEvent;
 	[PoolEvent.AGENT_COMPLETED]: AgentCompletedEvent;
 	[PoolEvent.AGENT_ERROR]: AgentErrorEvent;
+	[PoolEvent.AGENT_TIMEOUT]: AgentTimeoutEvent;
+	[PoolEvent.AGENT_RETRY]: AgentRetryEvent;
 	[PoolEvent.DELTA_DETECTED]: DeltaDetectedEvent;
 	[PoolEvent.SHARING_DECISION]: SharingDecisionEvent;
 	[PoolEvent.CONTEXT_SHARED]: ContextSharedEvent;
