@@ -13,6 +13,7 @@ import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 import { DecisionJournal } from "./decision-journal.ts";
+import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 
@@ -128,6 +129,9 @@ export class NotificationEngine {
 	/** Rolling journal of notification decisions for session memory. */
 	private readonly decisionJournal: DecisionJournal;
 
+	/** Optional reference to the orchestrator engine for directive injection. */
+	private _orchestratorEngine: OrchestratorEngine | null = null;
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly logger: pino.Logger,
@@ -169,6 +173,19 @@ export class NotificationEngine {
 	 */
 	getPreference(): NotificationPreference | null {
 		return this.preference ? { ...this.preference } : null;
+	}
+
+	/**
+	 * Sets the orchestrator engine reference for directive injection.
+	 *
+	 * Called after the orchestrator is instantiated (which happens after
+	 * the notification engine). The engine reads directives from the
+	 * orchestrator when building notification prompts.
+	 *
+	 * @param engine - The orchestrator engine instance.
+	 */
+	setOrchestratorEngine(engine: OrchestratorEngine): void {
+		this._orchestratorEngine = engine;
 	}
 
 	/**
@@ -300,6 +317,11 @@ export class NotificationEngine {
 		const recentNotificationCount =
 			this.decisionJournal.countRecentApprovedForTarget("user", 60);
 
+		// Get orchestrator directives for notification, if available
+		const orchestratorSection =
+			this._orchestratorEngine?.getDirectivePromptSection("notification") ??
+			null;
+
 		// Build the notification decision prompt with semantic framing
 		// (preference data is intentionally omitted — pre-filters already passed)
 		const prompt = notificationDecisionPrompt({
@@ -315,6 +337,7 @@ export class NotificationEngine {
 			decisionJournal: journalSection,
 			recentNotificationCount:
 				recentNotificationCount > 0 ? recentNotificationCount : null,
+			orchestratorDirectives: orchestratorSection,
 		});
 
 		this.logger.debug(

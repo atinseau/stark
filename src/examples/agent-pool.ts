@@ -202,6 +202,36 @@ export async function main(): Promise<void> {
 		);
 	});
 
+	// Orchestrator meta-reflection assessments
+	pool.on(PoolEvent.ORCHESTRATOR_ASSESSMENT, (e) => {
+		const { assessment } = e;
+		const scoreColor =
+			assessment.coherenceScore >= 0.8
+				? ansi.green
+				: assessment.coherenceScore >= 0.5
+					? ansi.yellow
+					: ansi.red;
+		info(
+			"🔮",
+			`${scoreColor}Orchestrator: coherence=${assessment.coherenceScore}${ansi.reset}, ` +
+				`${assessment.issues.length} issue(s), ${assessment.directives.length} directive(s)`,
+		);
+		if (assessment.issues.length > 0) {
+			for (const issue of assessment.issues) {
+				const icon =
+					issue.severity === "high"
+						? "🚨"
+						: issue.severity === "medium"
+							? "⚠️"
+							: "ℹ️";
+				info(
+					"  ",
+					`${icon} [${issue.category}] ${truncate(issue.description, 120)}`,
+				);
+			}
+		}
+	});
+
 	// Execution lifecycle
 	pool.on(PoolEvent.EXECUTION_COMPLETE, (e) => {
 		info(

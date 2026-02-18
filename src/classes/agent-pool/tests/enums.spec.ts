@@ -31,6 +31,9 @@ describe("Pool Enums", () => {
 		expect(PoolEvent.ERROR as string).toBe("pool:error");
 		expect(PoolEvent.DESTROYED as string).toBe("pool:destroyed");
 		expect(PoolEvent.APPROVE_REQUEST as string).toBe("pool:approve-request");
+		expect(PoolEvent.ORCHESTRATOR_ASSESSMENT as string).toBe(
+			"pool:orchestrator-assessment",
+		);
 	});
 
 	it("ConversationRole has all expected roles", () => {
@@ -45,6 +48,7 @@ describe("Pool Enums", () => {
 			"user-interaction",
 		);
 		expect(ConversationRole.INTENT_ANALYZER as string).toBe("intent-analyzer");
+		expect(ConversationRole.ORCHESTRATOR as string).toBe("orchestrator");
 	});
 
 	it("ExecutionStrategy has single and multi", () => {

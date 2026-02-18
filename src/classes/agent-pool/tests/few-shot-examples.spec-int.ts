@@ -26,7 +26,7 @@ import { TaskPlanner } from "../task-planner.ts";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
 const HAS_API_KEY = OPENROUTER_API_KEY.length > 0;
-const DEFAULT_MODEL = "openai/gpt-4.1-nano";
+const DEFAULT_MODEL = "openai/gpt-5-nano";
 const INT_MODEL = process.env.INT_MODEL ?? DEFAULT_MODEL;
 const INT_TIMEOUT_MS = 120_000;
 

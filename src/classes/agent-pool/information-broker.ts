@@ -16,6 +16,7 @@ import { isoNow } from "../../utils/formatting.ts";
 import type { ContextTracker } from "./context-tracker.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
 import { DecisionJournal } from "./decision-journal.ts";
+import type { OrchestratorEngine } from "./orchestrator-engine.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -281,6 +282,9 @@ export class InformationBroker {
 	/** Rolling journal of sharing decisions for session memory. */
 	private readonly decisionJournal: DecisionJournal;
 
+	/** Optional reference to the orchestrator engine for directive injection. */
+	private _orchestratorEngine: OrchestratorEngine | null = null;
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly contextTracker: ContextTracker,
@@ -501,6 +505,19 @@ export class InformationBroker {
 
 		// Retourner les N plus récents
 		return records.slice(-limit);
+	}
+
+	/**
+	 * Sets the orchestrator engine reference for directive injection.
+	 *
+	 * Called after the orchestrator is instantiated (which happens after
+	 * the broker). The broker reads directives from the orchestrator
+	 * when building sharing prompts.
+	 *
+	 * @param engine - The orchestrator engine instance.
+	 */
+	setOrchestratorEngine(engine: OrchestratorEngine): void {
+		this._orchestratorEngine = engine;
 	}
 
 	/**
@@ -767,6 +784,10 @@ export class InformationBroker {
 		// Include the decision journal in the prompt for session memory
 		const journalSection = this.decisionJournal.toPromptSection();
 
+		// Get orchestrator directives for sharing, if available
+		const orchestratorSection =
+			this._orchestratorEngine?.getDirectivePromptSection("sharing") ?? null;
+
 		const prompt = batchedSharingDecisionPrompt({
 			sourceAgent: {
 				agentId: sourceState.agentId,
@@ -787,6 +808,7 @@ export class InformationBroker {
 			},
 			targets,
 			decisionJournal: journalSection,
+			orchestratorDirectives: orchestratorSection,
 		});
 
 		this.logger.debug(

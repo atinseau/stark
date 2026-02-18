@@ -961,6 +961,129 @@ export interface ProjectContext {
 	readonly isEmpty: boolean;
 }
 
+// ── Orchestrator Types ─────────────────────────────────────────────────────
+
+/**
+ * A directive emitted by the ORCHESTRATOR to influence another conversation.
+ *
+ * Directives are not imperative orders — they are contextual
+ * recommendations that subsystems integrate into their next decisions.
+ */
+export interface OrchestratorDirective {
+	/** The unique identifier of this directive. */
+	readonly id: string;
+
+	/** The subsystem targeted by this directive. */
+	readonly target:
+		| "sharing"
+		| "notification"
+		| "planner"
+		| "checkpoint"
+		| "all";
+
+	/** The instruction to integrate into the subsystem's next decisions. */
+	readonly instruction: string;
+
+	/** Priority level of the directive. */
+	readonly priority: "suggestion" | "recommendation" | "strong";
+
+	/** Time-to-live in number of evaluations before automatic expiration. */
+	readonly ttlEvaluations: number;
+
+	/** ISO-8601 timestamp of creation. */
+	readonly timestamp: string;
+}
+
+/**
+ * Type of the target of a directive, for validation.
+ */
+export type DirectiveTarget = OrchestratorDirective["target"];
+
+/**
+ * A problem detected by the ORCHESTRATOR.
+ */
+export interface OrchestratorIssue {
+	/** Category of the problem. */
+	readonly category:
+		| "coherence"
+		| "efficiency"
+		| "drift"
+		| "conflict"
+		| "communication";
+
+	/** Severity of the problem. */
+	readonly severity: "low" | "medium" | "high";
+
+	/** Human-readable description of the problem. */
+	readonly description: string;
+
+	/** The agents or subsystems affected. */
+	readonly affected: string[];
+}
+
+/**
+ * Result of an ORCHESTRATOR evaluation.
+ *
+ * Produced periodically to give a global view of coordination
+ * quality in the system.
+ */
+export interface OrchestratorAssessment {
+	/** Global coherence score (0.0 = chaos, 1.0 = perfectly coordinated). */
+	readonly coherenceScore: number;
+
+	/** Textual assessment of the coordination state. */
+	readonly assessment: string;
+
+	/** Problems detected by the meta-analysis. */
+	readonly issues: OrchestratorIssue[];
+
+	/** Directives emitted to correct detected problems. */
+	readonly directives: OrchestratorDirective[];
+
+	/** ISO-8601 timestamp of this evaluation. */
+	readonly timestamp: string;
+
+	/** Sequential number of this evaluation in the current execution. */
+	readonly assessmentNumber: number;
+}
+
+/**
+ * Configuration for the ORCHESTRATOR engine.
+ */
+export interface OrchestratorConfig {
+	/** Enable/disable the ORCHESTRATOR (default: true for multi-agent, false for single). */
+	readonly enabled?: boolean;
+
+	/**
+	 * Minimum interval between two evaluations in number of deltas.
+	 * The ORCHESTRATOR does not trigger on every delta — it waits
+	 * for enough changes to accumulate for a meaningful evaluation.
+	 * Default: 8.
+	 */
+	readonly deltaInterval?: number;
+
+	/**
+	 * Minimum interval between two evaluations in milliseconds.
+	 * Even if the deltaInterval is reached, the ORCHESTRATOR waits
+	 * at least this delay between evaluations.
+	 * Default: 30000 (30 seconds).
+	 */
+	readonly minIntervalMs?: number;
+
+	/**
+	 * Maximum number of simultaneously active directives.
+	 * Beyond this, the oldest directives expire automatically.
+	 * Default: 10.
+	 */
+	readonly maxActiveDirectives?: number;
+
+	/**
+	 * Default time-to-live for directives in number of evaluations.
+	 * Default: 5.
+	 */
+	readonly defaultDirectiveTtl?: number;
+}
+
 // ── Planner Memory ─────────────────────────────────────────────────────────
 
 /**
@@ -1240,6 +1363,13 @@ export interface AgentPoolConfig {
 	 * that conforms to the agent interface used by the pool.
 	 */
 	readonly createAgent?: AgentFactory;
+
+	/**
+	 * Configuration for the ORCHESTRATOR (meta-reflection cross-conversation).
+	 * Activated automatically for multi-agent executions.
+	 * Disabled for single-agent executions (unnecessary).
+	 */
+	readonly orchestrator?: OrchestratorConfig;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────
@@ -1415,6 +1545,15 @@ export interface AgentPoolState {
 	 * context about previous executions in this session.
 	 */
 	readonly plannerMemoryCount: number;
+
+	/** Number of orchestrator assessments performed in the current execution. */
+	readonly orchestratorAssessmentCount: number;
+
+	/** Number of currently active orchestrator directives. */
+	readonly activeDirectiveCount: number;
+
+	/** Most recent coherence score from the orchestrator, or null. */
+	readonly coherenceScore: number | null;
 }
 
 // ── Pool Event Map ─────────────────────────────────────────────────────────
@@ -1514,6 +1653,11 @@ export interface CheckpointEvaluatedEvent extends BasePoolEvent {
 	readonly result: CheckpointResult;
 }
 
+export interface OrchestratorAssessmentEvent extends BasePoolEvent {
+	readonly event: PoolEvent.ORCHESTRATOR_ASSESSMENT;
+	readonly assessment: OrchestratorAssessment;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -1582,4 +1726,5 @@ export interface PoolEventMap {
 	[PoolEvent.REPLAN_START]: ReplanStartEvent;
 	[PoolEvent.REPLAN_COMPLETE]: ReplanCompleteEvent;
 	[PoolEvent.CHECKPOINT_EVALUATED]: CheckpointEvaluatedEvent;
+	[PoolEvent.ORCHESTRATOR_ASSESSMENT]: OrchestratorAssessmentEvent;
 }

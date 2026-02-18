@@ -29,4 +29,13 @@ export enum ConversationRole {
 
 	/** User intent classification and routing. */
 	INTENT_ANALYZER = "intent-analyzer",
+
+	/**
+	 * Meta-orchestrator for cross-conversation coordination.
+	 *
+	 * Periodically evaluates coordination quality across all active
+	 * agents and emits directives to improve coherence between the
+	 * sharing, notification, planning, and checkpoint subsystems.
+	 */
+	ORCHESTRATOR = "orchestrator",
 }

@@ -67,6 +67,11 @@ Delta: Agent "api-developer" encountered an error — npm package 'pg' not found
   "message": "⚠️ api-developer hit an error: npm package 'pg' is not installed. The agent may need the dependency added to proceed."
 }
 
+{{#if orchestratorDirectives}}
+
+{{orchestratorDirectives}}
+{{/if}}
+
 ## JSON Output
 {
   "shouldNotify": true | false,

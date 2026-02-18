@@ -14,6 +14,10 @@ export {
 } from "./intent-analysis.ts";
 export { notificationDecisionPrompt } from "./notification-decision.ts";
 export {
+	orchestratorEvaluationPrompt,
+	orchestratorSystemPrompt,
+} from "./orchestrator.ts";
+export {
 	planningSystemPrompt,
 	replanPrompt,
 	taskAnalysisPrompt,
@@ -35,6 +39,10 @@ import {
 	intentAnalysisSystemPrompt,
 } from "./intent-analysis.ts";
 import { notificationDecisionPrompt } from "./notification-decision.ts";
+import {
+	orchestratorEvaluationPrompt,
+	orchestratorSystemPrompt,
+} from "./orchestrator.ts";
 import {
 	planningSystemPrompt,
 	replanPrompt,
@@ -77,6 +85,10 @@ export const templates = {
 	// Checkpoint evaluation
 	checkpointSystem: checkpointSystemPrompt,
 	checkpoint: checkpointPrompt,
+
+	// Orchestrator (meta-reflection)
+	orchestratorSystem: orchestratorSystemPrompt,
+	orchestratorEvaluation: orchestratorEvaluationPrompt,
 
 	// Execution summary
 	summarySystem: summarySystemPrompt,

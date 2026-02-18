@@ -17,6 +17,7 @@ import {
 	contextAnalysisSystemPrompt,
 	intentAnalysisPrompt,
 	intentAnalysisSystemPrompt,
+	orchestratorSystemPrompt,
 	sharingAnalysisSystemPrompt,
 	summaryPrompt,
 	summarySystemPrompt,
@@ -78,12 +79,13 @@ import { ContextTracker } from "./context-tracker.ts";
 import { ConversationManager } from "./conversation-manager.ts";
 import { InformationBroker } from "./information-broker.ts";
 import { NotificationEngine } from "./notification-engine.ts";
+import { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { ProjectScanner } from "./project-scanner.ts";
 import { TaskPlanner } from "./task-planner.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const DEFAULT_MODEL = "anthropic/claude-opus-4.6";
+const DEFAULT_MODEL = "openai/gpt-5-nano";
 const DEFAULT_MAX_AGENTS = 5;
 
 // ── Intent Validator ───────────────────────────────────────────────────────
@@ -254,6 +256,9 @@ export class AgentPool extends EventEmitter {
 
 	/** Pending approval request manager (active when autoApprove is false). */
 	private readonly approvalManager: ApprovalManager;
+
+	/** Meta-reflection orchestrator engine. */
+	private readonly orchestratorEngine: OrchestratorEngine;
 
 	// ── Runtime State ──────────────────────────────────────────────────
 
@@ -435,6 +440,21 @@ export class AgentPool extends EventEmitter {
 		);
 		this.approvalManager = new ApprovalManager();
 
+		// Register the orchestrator conversation
+		this.conversations.register(
+			ConversationRole.ORCHESTRATOR,
+			orchestratorSystemPrompt({}),
+			modelOverrides[ConversationRole.ORCHESTRATOR],
+		);
+
+		// Meta-reflection orchestrator engine
+		this.orchestratorEngine = new OrchestratorEngine(
+			this.conversations,
+			this.contextTracker,
+			this.logger,
+			config.orchestrator,
+		);
+
 		this.logger.info(
 			{
 				model: this.config.model,
@@ -602,6 +622,10 @@ export class AgentPool extends EventEmitter {
 				this.agentToSubtask,
 			);
 
+			// Wire orchestrator engine into subsystems for directive injection
+			this.informationBroker.setOrchestratorEngine(this.orchestratorEngine);
+			this.notificationEngine.setOrchestratorEngine(this.orchestratorEngine);
+
 			// Create the checkpoint evaluator for multi-agent executions
 			if (analysis.strategy === ExecutionStrategy.MULTI) {
 				this.checkpointEvaluator = new CheckpointEvaluator(
@@ -745,6 +769,7 @@ export class AgentPool extends EventEmitter {
 			this.informationBroker = null;
 			this.checkpointEvaluator?.reset();
 			this.checkpointEvaluator = null;
+			this.orchestratorEngine.reset();
 			this._executionStartTime = 0;
 			this.subtaskToAgent.clear();
 			this.agentToSubtask.clear();
@@ -920,6 +945,10 @@ export class AgentPool extends EventEmitter {
 			timeoutCount: this._timeoutCount,
 			pendingApprovals: this.approvalManager.getPendingSummary(),
 			plannerMemoryCount: this.planner.memoryCount,
+			orchestratorAssessmentCount: this.orchestratorEngine.assessmentCount,
+			activeDirectiveCount: this.orchestratorEngine.activeDirectiveCount,
+			coherenceScore:
+				this.orchestratorEngine.previousAssessment?.coherenceScore ?? null,
 		};
 	}
 
@@ -2407,6 +2436,15 @@ export class AgentPool extends EventEmitter {
 					void this.executeCheckpoint(trigger);
 				}
 			}
+
+			// ── Meta-Reflection Orchestrator ────────────────────────────
+			if (
+				this.orchestratorEngine.isEnabled &&
+				this.orchestratorEngine.recordDelta()
+			) {
+				// Fire-and-forget: don't block delta processing
+				void this.evaluateOrchestrator();
+			}
 		} catch (error) {
 			this.logger.warn(
 				{
@@ -2415,6 +2453,60 @@ export class AgentPool extends EventEmitter {
 					error: toErrorMessage(error),
 				},
 				"Delta handling failed (non-critical)",
+			);
+		}
+	}
+
+	// ── Private: Orchestrator Evaluation ───────────────────────────────
+
+	/**
+	 * Triggers an orchestrator evaluation and processes the resulting directives.
+	 *
+	 * Called when the orchestrator's trigger conditions are met.
+	 * Errors are caught and logged — orchestrator failure is non-critical.
+	 */
+	private async evaluateOrchestrator(): Promise<void> {
+		if (!this._currentTask || !this._currentAnalysis || !this.informationBroker)
+			return;
+
+		try {
+			// Get the checkpoint evaluator's last result if available
+			const checkpointResult = this.checkpointEvaluator?.lastResult ?? null;
+
+			// Get the sharing journal from the information broker
+			const sharingJournal = this.informationBroker.journal ?? null;
+
+			const assessment = await this.orchestratorEngine.evaluate(
+				this._currentTask,
+				this._currentAnalysis,
+				this.informationBroker,
+				this.notificationEngine,
+				checkpointResult,
+				sharingJournal,
+			);
+
+			if (assessment) {
+				this.emitPoolEvent(PoolEvent.ORCHESTRATOR_ASSESSMENT, {
+					assessment,
+				});
+
+				// Log high-severity issues
+				for (const issue of assessment.issues) {
+					if (issue.severity === "high") {
+						this.logger.warn(
+							{
+								category: issue.category,
+								affected: issue.affected,
+							},
+							`Orchestrator issue [${issue.severity}]: ${issue.description}`,
+						);
+					}
+				}
+			}
+		} catch (error) {
+			this.logger.warn(
+				{ error: toErrorMessage(error) },
+				"Orchestrator evaluation failed (non-critical)",
 			);
 		}
 	}

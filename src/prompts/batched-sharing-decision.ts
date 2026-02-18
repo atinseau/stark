@@ -104,6 +104,11 @@ Source "frontend-dev" updated CSS styling. Target "test-writer" writes backend t
   ]
 }
 
+{{#if orchestratorDirectives}}
+
+{{orchestratorDirectives}}
+{{/if}}
+
 ## JSON Output
 Return one decision per target agent:
 {

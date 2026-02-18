@@ -100,4 +100,14 @@ export enum PoolEvent {
 	 * health score, detected issues, and any corrective instructions.
 	 */
 	CHECKPOINT_EVALUATED = "pool:checkpoint-evaluated",
+
+	/**
+	 * The meta-orchestrator has completed an assessment of coordination quality.
+	 *
+	 * Emitted periodically during multi-agent executions when the
+	 * orchestrator engine evaluates cross-conversation coherence.
+	 * The payload includes the full {@link OrchestratorAssessment}
+	 * with coherence score, detected issues, and directives.
+	 */
+	ORCHESTRATOR_ASSESSMENT = "pool:orchestrator-assessment",
 }

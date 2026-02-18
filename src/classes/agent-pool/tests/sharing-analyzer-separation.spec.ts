@@ -377,9 +377,9 @@ describe("Notification system prompt content quality", () => {
 // ── Test: Total conversation role count ────────────────────────────────────
 
 describe("ConversationRole enum completeness", () => {
-	it("has exactly 5 roles after separation", () => {
+	it("has exactly 6 roles after orchestrator addition", () => {
 		const allValues = Object.values(ConversationRole);
-		expect(allValues).toHaveLength(5);
+		expect(allValues).toHaveLength(6);
 	});
 
 	it("contains all expected roles", () => {
@@ -389,6 +389,7 @@ describe("ConversationRole enum completeness", () => {
 			"sharing-analyzer",
 			"user-interaction",
 			"intent-analyzer",
+			"orchestrator",
 		];
 
 		const actual = Object.values(ConversationRole) as string[];
