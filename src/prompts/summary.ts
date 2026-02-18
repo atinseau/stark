@@ -95,6 +95,13 @@ const SUMMARY_SOURCE = `Summarize this task execution.
 {{/if}}
 {{/if}}
 
+{{#if usage}}
+## Resource Usage
+- **Total Tokens**: {{usage.totalTokens}} (input: {{usage.inputTokens}}, output: {{usage.outputTokens}})
+{{#if usage.estimatedCostUsd}}- **Estimated Cost**: {{usage.estimatedCostUsd}}
+{{/if}}- **LLM Calls**: agents={{usage.breakdown.agents.callCount}}, pool={{poolLlmCallCount}}
+{{/if}}
+
 **Duration**: {{durationMs}}ms | **Agents**: {{agents.length}}
 
 Provide a concise summary following the structure defined in your system prompt.`;

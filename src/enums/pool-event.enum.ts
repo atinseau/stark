@@ -128,4 +128,24 @@ export enum PoolEvent {
 	 * outputs, overlapping file writes, or stale shared information.
 	 */
 	CONFLICT_DETECTED = "pool:conflict-detected",
+
+	/**
+	 * The budget tokens/cost approaches the warning threshold.
+	 *
+	 * Emitted once when the configured `warningThreshold` percentage
+	 * of the token or cost budget has been consumed. After emission,
+	 * the warning is sticky — it will not be emitted again for the
+	 * same execution even if consumption continues to rise.
+	 */
+	BUDGET_WARNING = "pool:budget-warning",
+
+	/**
+	 * The budget tokens/cost has been exceeded.
+	 *
+	 * The behavior depends on the configured `tokenBudget.onExceeded`
+	 * action: `"warn"` (emit event only), `"pause"` (stop new pool
+	 * LLM calls but let running agents finish), or `"abort"` (stop
+	 * the execution immediately).
+	 */
+	BUDGET_EXCEEDED = "pool:budget-exceeded",
 }

@@ -1,9 +1,14 @@
 import type pino from "pino";
 
 import type { ConversationRole } from "../../enums/conversation-role.enum.ts";
+import {
+	compressionPrompt,
+	compressionSystemPrompt,
+} from "../../prompts/compression.ts";
 import type {
 	ChatOptions,
 	Conversation,
+	ConversationCompressionConfig,
 	OpenRouterConfig,
 	OpenRouterMessage,
 } from "../../types/agent-pool.types.ts";
@@ -54,11 +59,64 @@ export class ConversationManager {
 	/** The shared OpenRouter client instance. */
 	readonly client: OpenRouterClient;
 
+	/**
+	 * Callback appelé après chaque appel LLM réussi pour reporter la consommation.
+	 * Injecté par l'AgentPool pour connecter le ConversationManager au CostTracker.
+	 */
+	private usageCallback:
+		| ((
+				role: ConversationRole,
+				inputTokens: number,
+				outputTokens: number,
+				costUsd?: number,
+		  ) => void)
+		| null = null;
+
+	/** Tracks how many times each conversation has been compressed. */
+	private readonly compressionCounts = new Map<ConversationRole, number>();
+
 	constructor(
 		config: OpenRouterConfig,
 		private readonly logger: pino.Logger,
 	) {
 		this.client = new OpenRouterClient(config, logger);
+	}
+
+	// ── Usage Tracking ─────────────────────────────────────────────────
+
+	/**
+	 * Définit le callback de tracking de consommation.
+	 *
+	 * Called by the AgentPool after construction to connect the
+	 * ConversationManager's LLM calls to the CostTracker.
+	 *
+	 * @param callback - The function to call after each successful LLM call.
+	 */
+	setUsageCallback(
+		callback: (
+			role: ConversationRole,
+			inputTokens: number,
+			outputTokens: number,
+			costUsd?: number,
+		) => void,
+	): void {
+		this.usageCallback = callback;
+	}
+
+	/**
+	 * Reports usage to the callback if one is set.
+	 * Uses the heuristic estimate (chars / 4) as a fallback.
+	 */
+	private reportUsage(
+		role: ConversationRole,
+		contentLength: number,
+		responseLength: number,
+	): void {
+		if (this.usageCallback) {
+			const estimatedInputTokens = Math.ceil(contentLength / 4);
+			const estimatedOutputTokens = Math.ceil(responseLength / 4);
+			this.usageCallback(role, estimatedInputTokens, estimatedOutputTokens);
+		}
 	}
 
 	// ── Registration ───────────────────────────────────────────────────
@@ -80,6 +138,9 @@ export class ConversationManager {
 			tokenCount: 0,
 			model,
 		});
+
+		// Initialize compression counter
+		this.compressionCounts.set(role, 0);
 
 		this.logger.debug(
 			{ conversationRole: role, systemPromptLength: systemPrompt.length },
@@ -161,6 +222,9 @@ export class ConversationManager {
 				`Response received from ${role} conversation`,
 			);
 
+			// Report usage to cost tracker
+			this.reportUsage(role, content.length, response.length);
+
 			return response;
 		} catch (error) {
 			// Remove the user message on failure so conversation stays clean
@@ -229,15 +293,19 @@ export class ConversationManager {
 
 		// Persist only the successful exchange in the conversation history
 		conversation.messages.push({ role: "user", content });
+		const resultStr = JSON.stringify(result);
 		conversation.messages.push({
 			role: "assistant",
-			content: JSON.stringify(result),
+			content: resultStr,
 		});
 
 		// Rough token estimate
 		conversation.tokenCount += Math.ceil(
-			(content.length + JSON.stringify(result).length) / 4,
+			(content.length + resultStr.length) / 4,
 		);
+
+		// Report usage to cost tracker
+		this.reportUsage(role, content.length, resultStr.length);
 
 		return result;
 	}
@@ -272,7 +340,12 @@ export class ConversationManager {
 			? { model: conversation.model, ...options }
 			: options;
 
-		return this.client.chat(messages, effectiveOptions);
+		const response = await this.client.chat(messages, effectiveOptions);
+
+		// Report usage to cost tracker
+		this.reportUsage(role, content.length, response.length);
+
+		return response;
 	}
 
 	/**
@@ -301,7 +374,189 @@ export class ConversationManager {
 			? { model: conversation.model, ...options }
 			: options;
 
-		return this.client.chatJson(messages, validator, effectiveOptions);
+		const result = await this.client.chatJson(
+			messages,
+			validator,
+			effectiveOptions,
+		);
+
+		// Report usage to cost tracker
+		const resultStr = JSON.stringify(result);
+		this.reportUsage(role, content.length, resultStr.length);
+
+		return result;
+	}
+
+	// ── Compression ────────────────────────────────────────────────────
+
+	/**
+	 * Vérifie si une conversation a besoin de compression.
+	 *
+	 * @param role - La conversation à vérifier.
+	 * @param thresholdTokens - Le seuil de tokens au-delà duquel compresser.
+	 * @returns `true` si la conversation dépasse le seuil.
+	 */
+	needsCompression(role: ConversationRole, thresholdTokens: number): boolean {
+		const conversation = this.conversations.get(role);
+		if (!conversation) return false;
+		return conversation.tokenCount >= thresholdTokens;
+	}
+
+	/**
+	 * Compresse l'historique d'une conversation en résumant les messages
+	 * les plus anciens et en gardant les plus récents intacts.
+	 *
+	 * Le processus :
+	 * 1. Calcule combien de messages garder (basé sur `retentionRatio`)
+	 * 2. Envoie les messages à compresser au LLM via un one-shot call
+	 * 3. Remplace les messages compressés par un unique message `system`
+	 *    contenant le résumé
+	 * 4. Préserve le system prompt original en première position
+	 *
+	 * @param role - La conversation à compresser.
+	 * @param config - Configuration de compression.
+	 * @returns Le nombre de tokens estimés économisés, ou 0 si pas de compression.
+	 */
+	async compress(
+		role: ConversationRole,
+		config: ConversationCompressionConfig,
+	): Promise<number> {
+		const conversation = this.conversations.get(role);
+		if (!conversation) return 0;
+
+		const messages = conversation.messages;
+
+		// Minimum de 4 messages pour que la compression ait du sens
+		// (system + au moins 3 user/assistant exchanges)
+		if (messages.length < 4) return 0;
+
+		// Check compression count limit
+		const maxCompressions = config.maxCompressions ?? 3;
+		const currentCompressions = this.compressionCounts.get(role) ?? 0;
+
+		if (currentCompressions >= maxCompressions) {
+			this.logger.warn(
+				{ conversationRole: role, maxCompressions },
+				`Max compressions reached for ${role}, performing hard reset`,
+			);
+			const savedTokens = conversation.tokenCount;
+			this.reset(role);
+			return savedTokens;
+		}
+
+		const retentionRatio = config.retentionRatio ?? 0.3;
+
+		// Messages to keep (most recent) — exclude the system prompt
+		const nonSystemMessages = messages.slice(1);
+		const keepCount = Math.max(
+			2,
+			Math.ceil(nonSystemMessages.length * retentionRatio),
+		);
+		const compressCount = nonSystemMessages.length - keepCount;
+
+		if (compressCount < 2) return 0; // Not enough to compress
+
+		const messagesToCompress = nonSystemMessages.slice(0, compressCount);
+		const messagesToKeep = nonSystemMessages.slice(compressCount);
+
+		// Determine conversation purpose for the compression prompt
+		const purposeMap: Record<string, string> = {
+			planner: "Strategic task analysis and decomposition",
+			"context-analyzer": "Notification evaluation for user-facing updates",
+			"sharing-analyzer": "Cross-agent information sharing decisions",
+			"user-interaction": "User-facing response generation",
+			"intent-analyzer": "User intent classification",
+			orchestrator: "Cross-conversation meta-reflection",
+		};
+		const purpose = purposeMap[role] ?? role;
+
+		// Build the compression prompt
+		const prompt = compressionPrompt({
+			messageCount: messagesToCompress.length,
+			conversationPurpose: purpose,
+			messages: messagesToCompress.map((m) => ({
+				role: m.role,
+				content: m.content,
+			})),
+		});
+
+		this.logger.info(
+			{
+				conversationRole: role,
+				totalMessages: messages.length,
+				compressing: compressCount,
+				keeping: keepCount,
+			},
+			`Compressing ${compressCount} messages in ${role} conversation`,
+		);
+
+		try {
+			// Use a one-shot call to avoid recursion (don't add to this conversation)
+			const compressedSummary = await this.client.chat([
+				{
+					role: "system",
+					content: compressionSystemPrompt({ maxLength: 2000 }),
+				},
+				{ role: "user", content: prompt },
+			]);
+
+			// Report usage for the compression call itself
+			this.reportUsage(role, prompt.length, compressedSummary.length);
+
+			// Estimate tokens saved
+			const oldTokenCount = messagesToCompress.reduce(
+				(acc, m) => acc + Math.ceil(m.content.length / 4),
+				0,
+			);
+			const newTokenCount = Math.ceil(compressedSummary.length / 4);
+			const tokensSaved = Math.max(0, oldTokenCount - newTokenCount);
+
+			// Rebuild the conversation: system prompt + compressed summary + kept messages
+			const compressedMessage: OpenRouterMessage = {
+				role: "system",
+				content: `[Compressed context from ${compressCount} earlier messages]\n\n${compressedSummary}`,
+			};
+
+			const systemPromptMessage = messages[0];
+			if (!systemPromptMessage) return 0;
+
+			conversation.messages = [
+				systemPromptMessage, // Original system prompt
+				compressedMessage,
+				...messagesToKeep,
+			];
+
+			// Update token count
+			conversation.tokenCount = conversation.messages.reduce(
+				(acc, m) => acc + Math.ceil(m.content.length / 4),
+				0,
+			);
+
+			// Track compression count
+			this.compressionCounts.set(role, currentCompressions + 1);
+
+			this.logger.info(
+				{
+					conversationRole: role,
+					tokensSaved,
+					newMessageCount: conversation.messages.length,
+					newEstimatedTokens: conversation.tokenCount,
+					compressionNumber: currentCompressions + 1,
+				},
+				`Compression complete: saved ~${tokensSaved} tokens`,
+			);
+
+			return tokensSaved;
+		} catch (error) {
+			this.logger.warn(
+				{
+					conversationRole: role,
+					error: error instanceof Error ? error.message : String(error),
+				},
+				`Compression failed for ${role} — conversation left unchanged`,
+			);
+			return 0;
+		}
 	}
 
 	// ── Introspection ──────────────────────────────────────────────────
@@ -354,6 +609,9 @@ export class ConversationManager {
 			{ role: "system", content: conversation.systemPrompt },
 		];
 		conversation.tokenCount = 0;
+
+		// Reset compression count on hard reset
+		this.compressionCounts.set(role, 0);
 
 		this.logger.debug(
 			{ conversationRole: role },

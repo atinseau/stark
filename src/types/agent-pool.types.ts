@@ -14,6 +14,165 @@ import type {
 	PromptResult,
 } from "./agent.types.ts";
 
+// ── Usage & Cost Tracking Types ────────────────────────────────────────────
+
+/**
+ * Snapshot de la consommation de tokens et du coût à un instant donné.
+ * Agrégé depuis les agents (USAGE_UPDATE events) et les appels LLM de la pool.
+ */
+export interface UsageSnapshot {
+	/** Nombre total de tokens d'entrée (prompt) consommés. */
+	readonly inputTokens: number;
+
+	/** Nombre total de tokens de sortie (completion) consommés. */
+	readonly outputTokens: number;
+
+	/** Nombre total de tokens (input + output). */
+	readonly totalTokens: number;
+
+	/** Coût total estimé en USD (si disponible depuis OpenRouter). */
+	readonly estimatedCostUsd: number | null;
+
+	/** Détail par source de consommation. */
+	readonly breakdown: UsageBreakdown;
+
+	/** ISO-8601 timestamp du snapshot. */
+	readonly timestamp: string;
+}
+
+/**
+ * Détail de la consommation par source.
+ */
+export interface UsageBreakdown {
+	/** Tokens consommés par les agents (ACP prompts). */
+	readonly agents: UsageEntry;
+
+	/** Tokens consommés par le planner. */
+	readonly planner: UsageEntry;
+
+	/** Tokens consommés par le sharing analyzer. */
+	readonly sharingAnalyzer: UsageEntry;
+
+	/** Tokens consommés par le context analyzer (notifications). */
+	readonly contextAnalyzer: UsageEntry;
+
+	/** Tokens consommés par l'intent analyzer. */
+	readonly intentAnalyzer: UsageEntry;
+
+	/** Tokens consommés par l'orchestrator. */
+	readonly orchestrator: UsageEntry;
+
+	/** Tokens consommés par le checkpoint evaluator. */
+	readonly checkpoint: UsageEntry;
+
+	/** Tokens consommés par le reflection engine. */
+	readonly reflection: UsageEntry;
+
+	/** Tokens consommés par le user interaction (summary). */
+	readonly userInteraction: UsageEntry;
+
+	/** Tokens consommés par la compression de conversations. */
+	readonly compression: UsageEntry;
+}
+
+/**
+ * Entrée de consommation pour une source individuelle.
+ */
+export interface UsageEntry {
+	/** Nombre d'appels LLM effectués. */
+	readonly callCount: number;
+
+	/** Nombre total de tokens consommés. */
+	readonly totalTokens: number;
+
+	/** Nombre de tokens d'entrée (prompt). */
+	readonly inputTokens: number;
+
+	/** Nombre de tokens de sortie (completion). */
+	readonly outputTokens: number;
+
+	/** Coût estimé en USD (si disponible). */
+	readonly estimatedCostUsd: number | null;
+}
+
+/**
+ * Configuration du budget tokens et coût pour une exécution.
+ *
+ * Quand un seuil est atteint, le pool émet un événement et peut
+ * prendre des mesures automatiques (compression, arrêt).
+ */
+export interface TokenBudgetConfig {
+	/**
+	 * Budget maximum de tokens total pour une exécution.
+	 * Inclut les agents ET les appels LLM de la pool.
+	 * 0 ou undefined = pas de limite.
+	 */
+	readonly maxTotalTokens?: number;
+
+	/**
+	 * Budget maximum en USD pour une exécution.
+	 * 0 ou undefined = pas de limite.
+	 */
+	readonly maxCostUsd?: number;
+
+	/**
+	 * Pourcentage du budget auquel émettre un avertissement (0.0-1.0).
+	 * Défaut : 0.8 (80%).
+	 */
+	readonly warningThreshold?: number;
+
+	/**
+	 * Action à entreprendre quand le budget est dépassé.
+	 * - `"warn"`: Émettre un événement BUDGET_EXCEEDED mais continuer.
+	 * - `"pause"`: Arrêter de lancer de nouveaux appels LLM de la pool
+	 *   (les agents en cours continuent).
+	 * - `"abort"`: Arrêter l'exécution immédiatement.
+	 * Défaut : `"warn"`.
+	 */
+	readonly onExceeded?: "warn" | "pause" | "abort";
+}
+
+/**
+ * Configuration de la compression automatique des conversations.
+ *
+ * Quand une conversation dépasse un seuil de tokens, les messages
+ * les plus anciens sont résumés en un seul message condensé.
+ * Le system prompt est toujours préservé.
+ */
+export interface ConversationCompressionConfig {
+	/**
+	 * Activer la compression automatique.
+	 * Défaut : true.
+	 */
+	readonly enabled?: boolean;
+
+	/**
+	 * Seuil de tokens (estimés) au-delà duquel déclencher la compression.
+	 * Défaut : 50_000.
+	 */
+	readonly compressionThresholdTokens?: number;
+
+	/**
+	 * Pourcentage de l'historique à conserver après compression (0.0-1.0).
+	 * Les messages les plus récents sont préservés, les anciens résumés.
+	 * Défaut : 0.3 (garder 30% des messages les plus récents).
+	 */
+	readonly retentionRatio?: number;
+
+	/**
+	 * Nombre maximum de compressions par conversation avant un reset hard.
+	 * Évite les résumés-de-résumés à l'infini.
+	 * Défaut : 3.
+	 */
+	readonly maxCompressions?: number;
+
+	/**
+	 * Conversations à ne jamais compresser (par ConversationRole).
+	 * Les conversations one-shot sont naturellement exclues.
+	 */
+	readonly excludeRoles?: ConversationRole[];
+}
+
 // ── OpenRouter Types ───────────────────────────────────────────────────────
 
 /** A single message in an OpenRouter chat conversation. */
@@ -1645,6 +1804,19 @@ export interface AgentPoolConfig {
 	 * Enabled by default for multi-agent executions.
 	 */
 	readonly conflictDetection?: ConflictDetectorConfig;
+
+	/**
+	 * Configuration du budget tokens/coût.
+	 * Si non fourni, aucune limite n'est appliquée mais le tracking
+	 * reste actif pour la visibilité.
+	 */
+	readonly tokenBudget?: TokenBudgetConfig;
+
+	/**
+	 * Configuration de la compression automatique des conversations.
+	 * Si non fourni, les valeurs par défaut sont utilisées.
+	 */
+	readonly conversationCompression?: ConversationCompressionConfig;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────
@@ -1711,6 +1883,12 @@ export interface AgentPoolResult {
 
 	/** Post-execution reflection with effectiveness analysis and insights, if performed. */
 	readonly reflection?: ExecutionReflection;
+
+	/**
+	 * Snapshot de la consommation finale de l'exécution.
+	 * Toujours disponible, même sans budget configuré.
+	 */
+	readonly usage: UsageSnapshot;
 }
 
 /**
@@ -1768,6 +1946,23 @@ export interface AgentExecutionResult {
 export interface AgentPoolState {
 	/** Whether the pool is currently executing a task. */
 	readonly executing: boolean;
+
+	/**
+	 * Snapshot de la consommation courante.
+	 * `null` si aucune exécution n'est en cours.
+	 */
+	readonly currentUsage: UsageSnapshot | null;
+
+	/**
+	 * Pourcentage du budget consommé (0.0-1.0).
+	 * `null` si aucun budget n'est configuré.
+	 */
+	readonly budgetUsagePercent: number | null;
+
+	/**
+	 * Indicateur d'avertissement de budget.
+	 */
+	readonly budgetWarning: boolean;
 
 	/** Number of conflicts detected in the current execution. */
 	readonly conflictCount: number;
@@ -1961,6 +2156,20 @@ export interface ConflictDetectedEvent extends BasePoolEvent {
 	readonly conflict: ConflictRecord;
 }
 
+export interface BudgetWarningEvent extends BasePoolEvent {
+	readonly event: PoolEvent.BUDGET_WARNING;
+	readonly currentUsage: UsageSnapshot;
+	readonly budgetUsagePercent: number;
+	readonly budgetType: "tokens" | "cost";
+}
+
+export interface BudgetExceededEvent extends BasePoolEvent {
+	readonly event: PoolEvent.BUDGET_EXCEEDED;
+	readonly currentUsage: UsageSnapshot;
+	readonly budgetType: "tokens" | "cost";
+	readonly action: "warn" | "pause" | "abort";
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -2032,4 +2241,6 @@ export interface PoolEventMap {
 	[PoolEvent.ORCHESTRATOR_ASSESSMENT]: OrchestratorAssessmentEvent;
 	[PoolEvent.REFLECTION_COMPLETE]: ReflectionCompleteEvent;
 	[PoolEvent.CONFLICT_DETECTED]: ConflictDetectedEvent;
+	[PoolEvent.BUDGET_WARNING]: BudgetWarningEvent;
+	[PoolEvent.BUDGET_EXCEEDED]: BudgetExceededEvent;
 }

@@ -38,6 +38,7 @@ import type {
 	ConflictRecord,
 	ContextDelta,
 	ContextEvent,
+	ConversationCompressionConfig,
 	CoordinationStats,
 	DetectedIntent,
 	ExecutionReflection,
@@ -80,6 +81,11 @@ import { CheckpointEvaluator } from "./checkpoint-evaluator.ts";
 import { ConflictDetector } from "./conflict-detector.ts";
 import { ContextTracker } from "./context-tracker.ts";
 import { ConversationManager } from "./conversation-manager.ts";
+import {
+	type BudgetSignal,
+	CostTracker,
+	type UsageSource,
+} from "./cost-tracker.ts";
 import { InformationBroker } from "./information-broker.ts";
 import { NotificationEngine } from "./notification-engine.ts";
 import { OrchestratorEngine } from "./orchestrator-engine.ts";
@@ -269,6 +275,26 @@ export class AgentPool extends EventEmitter {
 
 	/** Inter-agent conflict detection engine (created per-execution, multi-agent only). */
 	private conflictDetector: ConflictDetector | null = null;
+
+	/** Agrégateur de coûts et de consommation tokens. */
+	private readonly costTracker: CostTracker;
+
+	/** Configuration de la compression des conversations. */
+	private readonly compressionConfig: Required<
+		Pick<
+			ConversationCompressionConfig,
+			| "enabled"
+			| "compressionThresholdTokens"
+			| "retentionRatio"
+			| "maxCompressions"
+		>
+	> & { excludeRoles: ConversationRole[] };
+
+	/** Counter to throttle compression checks (every N deltas). */
+	private _compressionCheckCounter = 0;
+
+	/** How often to check for compression needs (in deltas). */
+	private static readonly COMPRESSION_CHECK_INTERVAL = 10;
 
 	// ── Runtime State ──────────────────────────────────────────────────
 
@@ -474,6 +500,44 @@ export class AgentPool extends EventEmitter {
 
 		// Wire the reflection engine into the planner for insight injection
 		this.planner.setReflectionEngine(this.reflectionEngine);
+
+		// Cost tracker
+		this.costTracker = new CostTracker(config.tokenBudget ?? null, this.logger);
+
+		// Compression config
+		this.compressionConfig = {
+			enabled: config.conversationCompression?.enabled ?? true,
+			compressionThresholdTokens:
+				config.conversationCompression?.compressionThresholdTokens ?? 50_000,
+			retentionRatio: config.conversationCompression?.retentionRatio ?? 0.3,
+			maxCompressions: config.conversationCompression?.maxCompressions ?? 3,
+			excludeRoles: config.conversationCompression?.excludeRoles ?? [],
+		};
+
+		// Wire the usage callback from ConversationManager to CostTracker
+		this.conversations.setUsageCallback(
+			(role, inputTokens, outputTokens, costUsd) => {
+				const sourceMap: Record<string, UsageSource> = {
+					[ConversationRole.PLANNER]: "planner",
+					[ConversationRole.CONTEXT_ANALYZER]: "contextAnalyzer",
+					[ConversationRole.SHARING_ANALYZER]: "sharingAnalyzer",
+					[ConversationRole.USER_INTERACTION]: "userInteraction",
+					[ConversationRole.INTENT_ANALYZER]: "intentAnalyzer",
+					[ConversationRole.ORCHESTRATOR]: "orchestrator",
+				};
+
+				const source: UsageSource = sourceMap[role] ?? "userInteraction";
+				this.costTracker.recordPoolCall(
+					source,
+					inputTokens,
+					outputTokens,
+					costUsd,
+				);
+
+				// Check budget after every pool LLM call
+				this.handleBudgetSignal(this.costTracker.checkBudget());
+			},
+		);
 
 		this.logger.info(
 			{
@@ -797,6 +861,32 @@ export class AgentPool extends EventEmitter {
 				);
 			}
 
+			// Capture the usage snapshot before cleanup
+			const usageSnapshot = this.costTracker.getSnapshot();
+
+			this.logger.info(
+				{
+					totalTokens: usageSnapshot.totalTokens,
+					inputTokens: usageSnapshot.inputTokens,
+					outputTokens: usageSnapshot.outputTokens,
+					estimatedCostUsd: usageSnapshot.estimatedCostUsd,
+					totalLlmCalls: this.costTracker.totalCallCount,
+					breakdown: {
+						agents: usageSnapshot.breakdown.agents.totalTokens,
+						planner: usageSnapshot.breakdown.planner.totalTokens,
+						sharing: usageSnapshot.breakdown.sharingAnalyzer.totalTokens,
+						notification: usageSnapshot.breakdown.contextAnalyzer.totalTokens,
+						orchestrator: usageSnapshot.breakdown.orchestrator.totalTokens,
+						checkpoint: usageSnapshot.breakdown.checkpoint.totalTokens,
+						reflection: usageSnapshot.breakdown.reflection.totalTokens,
+					},
+				},
+				`Usage summary: ${usageSnapshot.totalTokens} tokens, ${this.costTracker.totalCallCount} LLM calls` +
+					(usageSnapshot.estimatedCostUsd !== null
+						? `, $${usageSnapshot.estimatedCostUsd.toFixed(4)}`
+						: ""),
+			);
+
 			const poolResult: AgentPoolResult = {
 				task,
 				strategy: analysis.strategy,
@@ -805,6 +895,7 @@ export class AgentPool extends EventEmitter {
 				summary,
 				durationMs,
 				reflection,
+				usage: usageSnapshot,
 			};
 
 			this.emitPoolEvent(PoolEvent.EXECUTION_COMPLETE, {
@@ -861,6 +952,10 @@ export class AgentPool extends EventEmitter {
 			this._retryCount = 0;
 			this._timeoutCount = 0;
 			this._replanCount = 0;
+			this._compressionCheckCounter = 0;
+
+			// Reset cost tracker between executions
+			this.costTracker.reset();
 
 			// Clear detailed reflections but KEEP insights for future executions
 			this.reflectionEngine.clearReflections();
@@ -1019,6 +1114,9 @@ export class AgentPool extends EventEmitter {
 
 		return {
 			executing: this._executing,
+			currentUsage: this._executing ? this.costTracker.getSnapshot() : null,
+			budgetUsagePercent: this.costTracker.getBudgetUsagePercent(),
+			budgetWarning: this.costTracker.warningEmitted,
 			conflictCount: this.conflictDetector?.conflictCount ?? 0,
 			unresolvedConflictCount:
 				this.conflictDetector?.unresolvedHighSeverityCount ?? 0,
@@ -1280,6 +1378,26 @@ export class AgentPool extends EventEmitter {
 		for (const eventType of significantEvents) {
 			agent.on(eventType, (...args: unknown[]) => {
 				const payload = (args[0] ?? {}) as Record<string, unknown>;
+
+				// Track agent usage from USAGE_UPDATE events in the cost tracker
+				if (eventType === AgentEvent.USAGE_UPDATE) {
+					const contextUsed = payload.contextUsed as number | undefined;
+					const cost = payload.cost as number | undefined;
+					if (contextUsed !== undefined) {
+						// Estimate input/output split (rough — ACP doesn't distinguish)
+						const estimatedInput = Math.ceil(contextUsed * 0.7);
+						const estimatedOutput = contextUsed - estimatedInput;
+						this.costTracker.recordAgentUsage(
+							agent.id,
+							estimatedInput,
+							estimatedOutput,
+							cost,
+						);
+						// Check budget
+						this.handleBudgetSignal(this.costTracker.checkBudget());
+					}
+				}
+
 				const delta = this.contextTracker.processEvent(
 					agent.id,
 					eventType,
@@ -2354,10 +2472,128 @@ export class AgentPool extends EventEmitter {
 	 *
 	 * @param delta - The context delta to process.
 	 */
+	/**
+	 * Guard that checks if pool LLM calls are allowed.
+	 * Returns false if the budget is exceeded and the action is "pause" or "abort".
+	 */
+	private canMakePoolLlmCall(): boolean {
+		if (this.costTracker.isPaused) {
+			this.logger.debug("Pool LLM call blocked — budget paused");
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Handles a budget signal from the cost tracker.
+	 * Emits pool events and takes action based on the signal type
+	 * and the configured `onExceeded` behavior.
+	 */
+	private handleBudgetSignal(signal: BudgetSignal): void {
+		if (signal.type === "ok") return;
+
+		if (signal.type === "warning") {
+			const snapshot = this.costTracker.getSnapshot();
+
+			this.emitPoolEvent(PoolEvent.BUDGET_WARNING, {
+				currentUsage: snapshot,
+				budgetUsagePercent: signal.percent,
+				budgetType: signal.budgetType,
+			});
+
+			this.logger.warn(
+				{
+					budgetType: signal.budgetType,
+					percent: Math.round(signal.percent * 100),
+					totalTokens: snapshot.totalTokens,
+					estimatedCostUsd: snapshot.estimatedCostUsd,
+				},
+				`Budget warning: ${Math.round(signal.percent * 100)}% of ${signal.budgetType} budget consumed`,
+			);
+			return;
+		}
+
+		if (signal.type === "exceeded") {
+			const snapshot = this.costTracker.getSnapshot();
+			const action = this.config.tokenBudget?.onExceeded ?? "warn";
+
+			this.emitPoolEvent(PoolEvent.BUDGET_EXCEEDED, {
+				currentUsage: snapshot,
+				budgetType: signal.budgetType,
+				action,
+			});
+
+			this.logger.error(
+				{
+					budgetType: signal.budgetType,
+					action,
+					totalTokens: snapshot.totalTokens,
+					estimatedCostUsd: snapshot.estimatedCostUsd,
+				},
+				`Budget exceeded: ${signal.budgetType} limit reached — action: ${action}`,
+			);
+
+			switch (action) {
+				case "pause":
+					this.costTracker.pause();
+					break;
+				case "abort":
+					this.costTracker.pause();
+					break;
+				case "warn":
+					// No action — just the event
+					break;
+			}
+		}
+	}
+
+	/**
+	 * Checks all conversations and compresses any that exceed the threshold.
+	 * Called periodically from handleDelta() (throttled by delta count).
+	 */
+	private async checkConversationCompression(): Promise<void> {
+		if (!this.compressionConfig.enabled) return;
+		if (this.costTracker.isPaused) return; // Don't compress if budget is paused
+
+		const threshold = this.compressionConfig.compressionThresholdTokens;
+		const excludeRoles = this.compressionConfig.excludeRoles;
+
+		const rolesToCheck: ConversationRole[] = [
+			ConversationRole.PLANNER,
+			ConversationRole.CONTEXT_ANALYZER,
+			ConversationRole.SHARING_ANALYZER,
+			ConversationRole.USER_INTERACTION,
+			ConversationRole.ORCHESTRATOR,
+		].filter(
+			(role) =>
+				!excludeRoles.includes(role) &&
+				this.conversations.has(role) &&
+				this.conversations.needsCompression(role, threshold),
+		);
+
+		for (const role of rolesToCheck) {
+			const saved = await this.conversations.compress(
+				role,
+				this.compressionConfig,
+			);
+			if (saved > 0) {
+				this.costTracker.recordPoolCall(
+					"compression",
+					Math.ceil(saved * 0.3), // Rough estimate of compression input
+					Math.ceil(saved * 0.1), // Rough estimate of compression output
+				);
+			}
+		}
+	}
+
 	private async handleDelta(delta: ContextDelta): Promise<void> {
 		try {
 			// ── Information Sharing ─────────────────────────────────────
-			if (this.informationBroker && this.contextTracker.agentCount > 1) {
+			if (
+				this.informationBroker &&
+				this.contextTracker.agentCount > 1 &&
+				this.canMakePoolLlmCall()
+			) {
 				// Update the significance context before evaluation
 				const sigContext = this.buildSignificanceContext();
 				this.informationBroker.updateSignificanceContext(sigContext);
@@ -2498,19 +2734,30 @@ export class AgentPool extends EventEmitter {
 			}
 
 			// ── Notification Engine ────────────────────────────────────
-			const agentState = this.contextTracker.getAgentState(delta.agentId);
+			if (this.canMakePoolLlmCall()) {
+				const agentState = this.contextTracker.getAgentState(delta.agentId);
 
-			if (agentState) {
-				const notification = await this.notificationEngine.evaluate(
-					delta,
-					agentState,
-				);
+				if (agentState) {
+					const notification = await this.notificationEngine.evaluate(
+						delta,
+						agentState,
+					);
 
-				if (notification) {
-					this.emitPoolEvent(PoolEvent.NOTIFICATION, {
-						notification,
-					});
+					if (notification) {
+						this.emitPoolEvent(PoolEvent.NOTIFICATION, {
+							notification,
+						});
+					}
 				}
+			} // end canMakePoolLlmCall() guard for notifications
+
+			// ── Auto-compression check (throttled) ─────────────────────
+			this._compressionCheckCounter++;
+			if (
+				this._compressionCheckCounter % AgentPool.COMPRESSION_CHECK_INTERVAL ===
+				0
+			) {
+				void this.checkConversationCompression();
 			}
 
 			// ── Checkpoint Evaluation ──────────────────────────────────
@@ -2938,6 +3185,11 @@ export class AgentPool extends EventEmitter {
 
 		// For multi-agent tasks, use LLM summary
 		try {
+			const usageSnapshot = this.costTracker.getSnapshot();
+			const poolLlmCallCount =
+				this.costTracker.totalCallCount -
+				usageSnapshot.breakdown.agents.callCount;
+
 			const prompt = summaryPrompt({
 				task,
 				strategy: analysis.strategy,
@@ -2946,6 +3198,8 @@ export class AgentPool extends EventEmitter {
 				agents: results,
 				durationMs,
 				coordination: coordinationStats ?? null,
+				usage: usageSnapshot,
+				poolLlmCallCount,
 			});
 
 			const summary = await this.conversations.sendOneShot(

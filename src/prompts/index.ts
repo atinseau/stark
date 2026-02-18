@@ -3,6 +3,7 @@ export {
 	checkpointPrompt,
 	checkpointSystemPrompt,
 } from "./checkpoint.ts";
+export { compressionPrompt, compressionSystemPrompt } from "./compression.ts";
 export { conflictAnalysisPrompt } from "./conflict-analysis.ts";
 export {
 	contextAnalysisPrompt,
@@ -34,6 +35,7 @@ export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
 import { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 import { checkpointPrompt, checkpointSystemPrompt } from "./checkpoint.ts";
+import { compressionPrompt, compressionSystemPrompt } from "./compression.ts";
 import { conflictAnalysisPrompt } from "./conflict-analysis.ts";
 import {
 	contextAnalysisPrompt,
@@ -107,4 +109,7 @@ export const templates = {
 	// Reflection (post-execution analysis)
 	reflectionSystem: reflectionSystemPrompt,
 	reflection: reflectionPrompt,
+	// Conversation compression
+	compressionSystem: compressionSystemPrompt,
+	compression: compressionPrompt,
 } as const;
