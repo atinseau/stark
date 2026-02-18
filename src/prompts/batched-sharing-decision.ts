@@ -67,7 +67,7 @@ Good decision:
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": true,
       "reasoning": "The test writer needs to know the exact endpoint signatures and response formats to write accurate tests. This is a blocking dependency.",
       "information": "The users API has been implemented in src/routes/users.ts with the following endpoints: GET /users (returns User[]), POST /users (body: {name, email}, returns User), PUT /users/:id (body: partial User, returns User), DELETE /users/:id (returns 204). User model: {id: string, name: string, email: string, createdAt: Date}."
@@ -83,7 +83,7 @@ Good decision (only shares NEW information):
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": true,
       "reasoning": "New products API endpoints are relevant for the test writer. User API info was already shared — only sharing the NEW products information.",
       "information": "A new products API has been added in src/routes/products.ts: GET /products, POST /products (body: {name, price}), GET /products/:id. Product model: {id: string, name: string, price: number}."
@@ -96,7 +96,7 @@ Source "frontend-dev" updated CSS styling. Target "test-writer" writes backend t
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": false,
       "reasoning": "CSS styling changes are purely visual and have no impact on backend test logic. Sharing would be noise.",
       "information": ""
@@ -118,6 +118,6 @@ Return one decision per target agent:
 }`;
 
 export const batchedSharingDecisionPrompt = Handlebars.compile(
-	BATCHED_SHARING_DECISION_SOURCE,
-	{ noEscape: true },
+  BATCHED_SHARING_DECISION_SOURCE,
+  { noEscape: true },
 );

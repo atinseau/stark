@@ -65,8 +65,8 @@ Agent "api-dev" encountered a transient network error fetching dependencies, ret
 }`;
 
 export const contextAnalysisSystemPrompt = Handlebars.compile(
-	NOTIFICATION_ANALYSIS_SYSTEM_SOURCE,
-	{ noEscape: true },
+  NOTIFICATION_ANALYSIS_SYSTEM_SOURCE,
+  { noEscape: true },
 );
 
 // ── Sharing Evaluation: System Prompt ──────────────────────────────────────
@@ -108,7 +108,7 @@ Source agent "api-dev" completed the users REST API. Target agent "test-writer" 
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": true,
       "reasoning": "The test writer has a blocking dependency on the API implementation. Sharing the endpoint structure is essential for writing accurate tests.",
       "information": "Users API implemented in src/routes/users.ts with GET/POST/PUT/DELETE /users endpoints. User model: {id, name, email, createdAt}. Auth middleware applied to PUT/DELETE."
@@ -121,7 +121,7 @@ Source agent "api-dev" read file package.json. Target agent "test-writer" depend
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": false,
       "reasoning": "Reading package.json is routine exploration. The test writer can read the same file if needed. No actionable information to share.",
       "information": ""
@@ -134,7 +134,7 @@ Source agent "db-setup" encountered an error: PostgreSQL not available, falling 
 {
   "decisions": [
     {
-      "targetAgentId": "agent-api-dev-id",
+      "targetAgentId": "ex-backend-002",
       "shouldShare": true,
       "reasoning": "The database engine change directly affects how the API agent writes queries and configures connections. This is critical information.",
       "information": "Database changed from PostgreSQL to SQLite due to availability. Use better-sqlite3 package. Connection file: src/db/connection.ts. No need for connection pooling with SQLite."
@@ -147,7 +147,7 @@ Source agent "api-dev" updated the users endpoint with pagination. Target agent 
 {
   "decisions": [
     {
-      "targetAgentId": "agent-test-writer-id",
+      "targetAgentId": "ex-tester-001",
       "shouldShare": false,
       "reasoning": "The core API structure was already shared. Pagination is an incremental detail the test writer will discover when reading the implementation files. Avoid redundant context pollution.",
       "information": ""
@@ -169,8 +169,8 @@ Return one decision per target agent:
 }`;
 
 export const sharingAnalysisSystemPrompt = Handlebars.compile(
-	SHARING_ANALYSIS_SYSTEM_SOURCE,
-	{ noEscape: true },
+  SHARING_ANALYSIS_SYSTEM_SOURCE,
+  { noEscape: true },
 );
 
 // ── Context Analysis: Delta Analysis User Prompt ───────────────────────────
@@ -217,6 +217,6 @@ const CONTEXT_ANALYSIS_SOURCE = `Analyze this context change and recommend an ac
 Respond with JSON recommendation.`;
 
 export const contextAnalysisPrompt = Handlebars.compile(
-	CONTEXT_ANALYSIS_SOURCE,
-	{ noEscape: true },
+  CONTEXT_ANALYSIS_SOURCE,
+  { noEscape: true },
 );
