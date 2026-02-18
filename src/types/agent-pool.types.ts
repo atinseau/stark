@@ -1626,6 +1626,172 @@ export interface ConflictDetectorConfig {
 	readonly maxConflicts?: number;
 }
 
+// ── Task Queue Types ───────────────────────────────────────────────────────
+
+/**
+ * Configuration de la file d'attente de tâches.
+ *
+ * Par défaut, la queue est désactivée — le pool se comporte comme
+ * aujourd'hui (une seule tâche à la fois, throw si déjà en cours).
+ *
+ * Quand activée, les tâches soumises pendant une exécution sont
+ * mises en file d'attente et exécutées automatiquement.
+ */
+export interface TaskQueueConfig {
+	/**
+	 * Activer la file d'attente de tâches.
+	 * Défaut : false (comportement legacy — throw si déjà en cours).
+	 */
+	readonly enabled?: boolean;
+
+	/**
+	 * Nombre maximum de tâches pouvant s'exécuter en parallèle.
+	 * - `1` : Exécution séquentielle (FIFO). Les tâches sont exécutées
+	 *   une par une dans l'ordre de soumission.
+	 * - `2+` : Exécution concurrente. Jusqu'à N tâches s'exécutent en
+	 *   parallèle. Les tâches sont démarrées dans l'ordre FIFO dès
+	 *   qu'un slot se libère.
+	 * Défaut : 1 (séquentiel).
+	 *
+	 * Note : chaque tâche en parallèle peut elle-même avoir plusieurs
+	 * agents (multi-agent strategy). Le nombre total d'agents actifs
+	 * est limité par `maxAgents` au niveau de la pool, partagé entre
+	 * toutes les tâches concurrentes.
+	 */
+	readonly maxConcurrent?: number;
+
+	/**
+	 * Nombre maximum de tâches en attente dans la queue.
+	 * Au-delà, les nouvelles soumissions sont rejetées avec une erreur.
+	 * 0 ou undefined = pas de limite.
+	 */
+	readonly maxQueueSize?: number;
+
+	/**
+	 * Priorité par défaut pour les tâches sans priorité explicite.
+	 * Les tâches à priorité plus élevée sont exécutées en premier (FIFO
+	 * à priorité égale).
+	 * Défaut : 0.
+	 */
+	readonly defaultPriority?: number;
+
+	/**
+	 * Timeout maximum qu'une tâche peut rester dans la queue avant
+	 * d'être automatiquement rejetée (en millisecondes).
+	 * 0 ou undefined = pas de timeout de queue.
+	 */
+	readonly queueTimeoutMs?: number;
+}
+
+/**
+ * Représentation d'une tâche dans la file d'attente.
+ */
+export interface QueuedTask {
+	/** Identifiant unique de la tâche dans la queue. */
+	readonly id: string;
+
+	/** Description textuelle de la tâche. */
+	readonly task: string;
+
+	/** Priorité de la tâche (plus grand = plus prioritaire). */
+	readonly priority: number;
+
+	/** État de la tâche dans la queue. */
+	readonly status:
+		| "queued"
+		| "executing"
+		| "completed"
+		| "failed"
+		| "cancelled"
+		| "expired";
+
+	/** ISO-8601 timestamp de soumission. */
+	readonly submittedAt: string;
+
+	/** ISO-8601 timestamp de début d'exécution (null si pas encore démarrée). */
+	readonly startedAt: string | null;
+
+	/** ISO-8601 timestamp de fin (null si pas encore terminée). */
+	readonly completedAt: string | null;
+
+	/** Résultat de l'exécution (null si pas encore terminée). */
+	readonly result: AgentPoolResult | null;
+
+	/** Message d'erreur si la tâche a échoué ou a été rejetée. */
+	readonly error: string | null;
+}
+
+/**
+ * Handle retourné lors de la soumission d'une tâche à la queue.
+ *
+ * Permet au caller de suivre la progression et d'attendre la complétion
+ * sans bloquer la soumission.
+ *
+ * @example
+ * ```ts
+ * const handle = pool.enqueue("Build a REST API");
+ * console.log(handle.id);       // "task-abc123"
+ * console.log(handle.position); // 0 (premier dans la queue)
+ *
+ * // Non-bloquant — le caller peut continuer
+ * const result = await handle.completion;
+ * console.log(result.strategy); // "multi"
+ * ```
+ */
+export interface TaskHandle {
+	/** Identifiant unique de la tâche dans la queue. */
+	readonly id: string;
+
+	/** Position dans la queue au moment de la soumission (0-based). */
+	readonly position: number;
+
+	/**
+	 * Promise qui se résout quand la tâche est terminée.
+	 * Se résout avec le `AgentPoolResult` en cas de succès.
+	 * Se rejette avec une `Error` en cas d'échec, annulation, ou expiration.
+	 */
+	readonly completion: Promise<AgentPoolResult>;
+
+	/**
+	 * Annule la tâche si elle est encore en attente.
+	 * Si la tâche est déjà en cours d'exécution, tente de l'annuler
+	 * (destroy des agents en cours).
+	 *
+	 * @returns `true` si la tâche a été annulée, `false` si elle était
+	 *          déjà terminée ou annulée.
+	 */
+	readonly cancel: () => Promise<boolean>;
+}
+
+/**
+ * État observable de la file d'attente de tâches.
+ */
+export interface TaskQueueState {
+	/** Nombre de tâches actuellement en attente. */
+	readonly pendingCount: number;
+
+	/** Nombre de tâches actuellement en cours d'exécution. */
+	readonly executingCount: number;
+
+	/** Nombre total de tâches traitées (complétées + échouées). */
+	readonly processedCount: number;
+
+	/** Nombre maximum de tâches concurrentes configuré. */
+	readonly maxConcurrent: number;
+
+	/** Détail des tâches en attente (les plus proches d'être exécutées en premier). */
+	readonly pendingTasks: readonly Pick<
+		QueuedTask,
+		"id" | "task" | "priority" | "submittedAt"
+	>[];
+
+	/** Détail des tâches en cours d'exécution. */
+	readonly executingTasks: readonly Pick<
+		QueuedTask,
+		"id" | "task" | "priority" | "startedAt"
+	>[];
+}
+
 // ── Agent Pool Configuration ───────────────────────────────────────────────
 
 /**
@@ -1817,6 +1983,13 @@ export interface AgentPoolConfig {
 	 * Si non fourni, les valeurs par défaut sont utilisées.
 	 */
 	readonly conversationCompression?: ConversationCompressionConfig;
+
+	/**
+	 * Configuration de la file d'attente de tâches.
+	 * Si non fourni ou `enabled: false`, le pool se comporte comme
+	 * aujourd'hui (une seule tâche à la fois, throw si déjà en cours).
+	 */
+	readonly taskQueue?: TaskQueueConfig;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────
@@ -1946,6 +2119,12 @@ export interface AgentExecutionResult {
 export interface AgentPoolState {
 	/** Whether the pool is currently executing a task. */
 	readonly executing: boolean;
+
+	/**
+	 * État de la file d'attente de tâches.
+	 * `null` si la queue n'est pas activée.
+	 */
+	readonly queue: TaskQueueState | null;
 
 	/**
 	 * Snapshot de la consommation courante.
@@ -2170,6 +2349,44 @@ export interface BudgetExceededEvent extends BasePoolEvent {
 	readonly action: "warn" | "pause" | "abort";
 }
 
+export interface TaskQueuedEvent extends BasePoolEvent {
+	readonly event: PoolEvent.TASK_QUEUED;
+	readonly taskId: string;
+	readonly task: string;
+	readonly priority: number;
+	readonly position: number;
+	readonly queueSize: number;
+}
+
+export interface TaskDequeuedEvent extends BasePoolEvent {
+	readonly event: PoolEvent.TASK_DEQUEUED;
+	readonly taskId: string;
+	readonly task: string;
+	readonly waitTimeMs: number;
+}
+
+export interface QueueDrainedEvent extends BasePoolEvent {
+	readonly event: PoolEvent.QUEUE_DRAINED;
+	readonly totalProcessed: number;
+	readonly totalSucceeded: number;
+	readonly totalFailed: number;
+	readonly totalCancelled: number;
+}
+
+export interface TaskCancelledEvent extends BasePoolEvent {
+	readonly event: PoolEvent.TASK_CANCELLED;
+	readonly taskId: string;
+	readonly task: string;
+	readonly wasExecuting: boolean;
+}
+
+export interface TaskExpiredEvent extends BasePoolEvent {
+	readonly event: PoolEvent.TASK_EXPIRED;
+	readonly taskId: string;
+	readonly task: string;
+	readonly waitTimeMs: number;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -2243,4 +2460,9 @@ export interface PoolEventMap {
 	[PoolEvent.CONFLICT_DETECTED]: ConflictDetectedEvent;
 	[PoolEvent.BUDGET_WARNING]: BudgetWarningEvent;
 	[PoolEvent.BUDGET_EXCEEDED]: BudgetExceededEvent;
+	[PoolEvent.TASK_QUEUED]: TaskQueuedEvent;
+	[PoolEvent.TASK_DEQUEUED]: TaskDequeuedEvent;
+	[PoolEvent.QUEUE_DRAINED]: QueueDrainedEvent;
+	[PoolEvent.TASK_CANCELLED]: TaskCancelledEvent;
+	[PoolEvent.TASK_EXPIRED]: TaskExpiredEvent;
 }

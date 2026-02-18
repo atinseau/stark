@@ -56,6 +56,7 @@ import type {
 	SubtaskRetryConfig,
 	TaskAnalysis,
 	TaskDependency,
+	TaskHandle,
 } from "../../types/agent-pool.types.ts";
 import {
 	CheckpointAction,
@@ -92,6 +93,7 @@ import { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { ProjectScanner } from "./project-scanner.ts";
 import { ReflectionEngine } from "./reflection-engine.ts";
 import { TaskPlanner } from "./task-planner.ts";
+import { TaskQueue } from "./task-queue.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -296,10 +298,18 @@ export class AgentPool extends EventEmitter {
 	/** How often to check for compression needs (in deltas). */
 	private static readonly COMPRESSION_CHECK_INTERVAL = 10;
 
+	// ── Task Queue ─────────────────────────────────────────────────────
+
+	/** Task queue for non-blocking task submission (null if not enabled). */
+	private readonly taskQueue: TaskQueue | null = null;
+
 	// ── Runtime State ──────────────────────────────────────────────────
 
 	/** Whether the pool is currently executing a task. */
 	private _executing = false;
+
+	/** Number of concurrently executing tasks (for queue mode). */
+	private _executingCount = 0;
 
 	/** The current task description, if any. */
 	private _currentTask: string | null = null;
@@ -539,6 +549,91 @@ export class AgentPool extends EventEmitter {
 			},
 		);
 
+		// Task queue (optional)
+		if (config.taskQueue?.enabled) {
+			this.taskQueue = new TaskQueue(
+				// Executor: wraps the pool's internal execute logic
+				// Includes the same restart loop as legacy execute() for ReplanRestartError
+				async (task: string, _queueTaskId: string) => {
+					const MAX_RESTARTS = 1;
+					let restartCount = 0;
+
+					while (restartCount <= MAX_RESTARTS) {
+						try {
+							return await this._executeInternal(task);
+						} catch (error) {
+							if (
+								error instanceof ReplanRestartError &&
+								restartCount < MAX_RESTARTS
+							) {
+								this.logger.info(
+									{
+										restartCount,
+										reasoning: error.decision.reasoning,
+									},
+									"Restarting queued execution due to replan decision",
+								);
+								restartCount++;
+								await this.destroyManagedAgents();
+								this.subtaskToAgent.clear();
+								this.agentToSubtask.clear();
+								this._deltaCount = 0;
+								this._sharingDecisionCount = 0;
+								this._replanCount = 0;
+								continue;
+							}
+							throw error;
+						}
+					}
+
+					throw new Error("Execution restart loop exceeded maximum attempts");
+				},
+				// Callbacks: translate to pool events
+				{
+					onQueued: (task, position, queueSize) => {
+						this.emitPoolEvent(PoolEvent.TASK_QUEUED, {
+							taskId: task.id,
+							task: task.task,
+							priority: task.priority,
+							position,
+							queueSize,
+						});
+					},
+					onDequeued: (task, waitTimeMs) => {
+						this.emitPoolEvent(PoolEvent.TASK_DEQUEUED, {
+							taskId: task.id,
+							task: task.task,
+							waitTimeMs,
+						});
+					},
+					onDrained: (stats) => {
+						this.emitPoolEvent(PoolEvent.QUEUE_DRAINED, {
+							totalProcessed: stats.total,
+							totalSucceeded: stats.succeeded,
+							totalFailed: stats.failed,
+							totalCancelled: stats.cancelled,
+						});
+					},
+					onCancelled: (task, wasExecuting) => {
+						this.emitPoolEvent(PoolEvent.TASK_CANCELLED, {
+							taskId: task.id,
+							task: task.task,
+							wasExecuting,
+						});
+					},
+					onExpired: (task, waitTimeMs) => {
+						this.emitPoolEvent(PoolEvent.TASK_EXPIRED, {
+							taskId: task.id,
+							task: task.task,
+							waitTimeMs,
+						});
+					},
+				},
+				config.taskQueue,
+				this.logger,
+			);
+		}
+
 		this.logger.info(
 			{
 				model: this.config.model,
@@ -554,25 +649,36 @@ export class AgentPool extends EventEmitter {
 	 * Executes a task by analyzing it, deciding on a strategy, spawning
 	 * agent(s), and orchestrating the full execution pipeline.
 	 *
-	 * This is the main entry point for task execution. The method:
+	 * ## Behavior with TaskQueue
 	 *
-	 * 1. Analyzes the task via the LLM-driven planner
-	 * 2. Decides: single agent or multiple agents
-	 * 3. Spawns the appropriate number of agents
-	 * 4. Executes subtasks (respecting dependencies and parallelism)
-	 * 5. Monitors context deltas for sharing and notifications
-	 * 6. Aggregates results and generates an execution summary
+	 * When the task queue is enabled (`taskQueue.enabled: true`):
+	 * - If a slot is available, the task executes immediately.
+	 * - If all slots are busy, the task is queued and executed when
+	 *   a slot frees up.
+	 * - The method still returns a Promise<AgentPoolResult> that resolves
+	 *   when the task completes (which may be later if queued).
+	 *
+	 * When the task queue is NOT enabled (default):
+	 * - Throws if a task is already executing (legacy behavior).
 	 *
 	 * @param task - The user's task description.
 	 * @returns A complete {@link AgentPoolResult} with all execution details.
 	 * @throws If the pool has been destroyed.
+	 * @throws If already executing and queue is not enabled.
 	 */
 	async execute(task: string): Promise<AgentPoolResult> {
 		this.assertNotDestroyed();
 
+		// If queue is enabled, go through the queue
+		if (this.taskQueue) {
+			const handle = this.taskQueue.enqueue(task);
+			return handle.completion;
+		}
+
 		// ── Model validation (cached — only hits OpenRouter API once) ────
 		await this.conversations.client.validateModel();
 
+		// Legacy behavior: no queue, single execution
 		if (this._executing) {
 			throw new Error(
 				"AgentPool is already executing a task. Wait for the current execution to complete or cancel it.",
@@ -623,9 +729,17 @@ export class AgentPool extends EventEmitter {
 	 * 3. Subtask execution (with replanning support)
 	 * 4. Summary generation
 	 * 5. Cleanup
+	 *
+	 * When called via the TaskQueue, multiple concurrent invocations may
+	 * be in flight. The `_executingCount` field tracks concurrency, and
+	 * `_executing` remains `true` as long as any task is running.
 	 */
 	private async _executeInternal(task: string): Promise<AgentPoolResult> {
+		// ── Model validation (cached — only hits OpenRouter API once) ────
+		await this.conversations.client.validateModel();
+
 		const startTime = Date.now();
+		this._executingCount++;
 		this._executing = true;
 		this._currentTask = task;
 
@@ -934,8 +1048,11 @@ export class AgentPool extends EventEmitter {
 
 			throw error;
 		} finally {
-			this._executing = false;
-			this._currentTask = null;
+			this._executingCount--;
+			if (this._executingCount === 0) {
+				this._executing = false;
+				this._currentTask = null;
+			}
 			this._currentStrategy = null;
 			this._currentAnalysis = null;
 			this.informationBroker = null;
@@ -994,7 +1111,10 @@ export class AgentPool extends EventEmitter {
 		this.assertNotDestroyed();
 
 		// ── Model validation (cached — only hits OpenRouter API once) ────
-		await this.conversations.client.validateModel();
+		// Skip validation if we might just be queueing — it will be done in _executeInternal
+		if (!this.taskQueue) {
+			await this.conversations.client.validateModel();
+		}
 
 		// Record user message in conversation history
 		this.recordConversation("user", message);
@@ -1114,6 +1234,7 @@ export class AgentPool extends EventEmitter {
 
 		return {
 			executing: this._executing,
+			queue: this.taskQueue ? this.taskQueue.getState() : null,
 			currentUsage: this._executing ? this.costTracker.getSnapshot() : null,
 			budgetUsagePercent: this.costTracker.getBudgetUsagePercent(),
 			budgetWarning: this.costTracker.warningEmitted,
@@ -1143,6 +1264,35 @@ export class AgentPool extends EventEmitter {
 	}
 
 	/**
+	 * Submits a task to the queue for non-blocking execution.
+	 *
+	 * Returns immediately with a `TaskHandle` that provides a `completion`
+	 * promise and a `cancel()` method.
+	 *
+	 * Only available when the task queue is enabled in the configuration.
+	 * Throws if the queue is not enabled.
+	 *
+	 * @param task - The task description.
+	 * @param options - Optional overrides (priority).
+	 * @returns A `TaskHandle` for tracking and cancellation.
+	 * @throws If the queue is not enabled.
+	 * @throws If the queue is full.
+	 * @throws If the pool has been destroyed.
+	 */
+	enqueue(task: string, options?: { priority?: number }): TaskHandle {
+		this.assertNotDestroyed();
+
+		if (!this.taskQueue) {
+			throw new Error(
+				"Task queue is not enabled. Set `taskQueue: { enabled: true }` " +
+					"in the AgentPool configuration, or use `execute()` for single-task execution.",
+			);
+		}
+
+		return this.taskQueue.enqueue(task, options);
+	}
+
+	/**
 	 * Sets the user's notification preference directly.
 	 *
 	 * This is a convenience method that bypasses intent analysis.
@@ -1165,6 +1315,11 @@ export class AgentPool extends EventEmitter {
 	 */
 	async destroy(): Promise<void> {
 		if (this._destroyed) return;
+
+		// Shutdown the queue first (cancels pending, cancels executing)
+		if (this.taskQueue) {
+			await this.taskQueue.shutdown(false);
+		}
 
 		// Deny all pending approvals so blocked agents can unblock
 		this.approvalManager.clear();
@@ -1254,17 +1409,38 @@ export class AgentPool extends EventEmitter {
 			await mkdir(this.config.cwd, { recursive: true });
 		}
 
-		// Enforce max agents
-		const subtasksToSpawn = analysis.subtasks.slice(0, this.config.maxAgents);
+		// Enforce max agents INCLUDING agents from concurrent tasks
+		const currentActiveCount = this.managedAgents.size;
+		const availableSlots = Math.max(
+			0,
+			this.config.maxAgents - currentActiveCount,
+		);
+		const subtasksToSpawn = analysis.subtasks.slice(0, availableSlots);
+
+		if (subtasksToSpawn.length === 0 && analysis.subtasks.length > 0) {
+			this.logger.warn(
+				{
+					requested: analysis.subtasks.length,
+					currentActive: currentActiveCount,
+					limit: this.config.maxAgents,
+				},
+				"No agent slots available — maxAgents limit reached by concurrent tasks",
+			);
+			throw new Error(
+				`Cannot spawn agents — all ${this.config.maxAgents} slots are in use by concurrent tasks. ` +
+					`Consider increasing maxAgents or reducing maxConcurrent.`,
+			);
+		}
 
 		if (subtasksToSpawn.length < analysis.subtasks.length) {
 			this.logger.warn(
 				{
 					requested: analysis.subtasks.length,
+					available: availableSlots,
 					limit: this.config.maxAgents,
 					spawning: subtasksToSpawn.length,
 				},
-				`Subtask count exceeds maxAgents limit (${this.config.maxAgents}), truncating`,
+				`Subtask count limited by agent usage (${currentActiveCount}/${this.config.maxAgents} slots in use)`,
 			);
 		}
 
@@ -3447,6 +3623,20 @@ export class AgentPool extends EventEmitter {
 					typeof detected.parameters.task === "string"
 						? detected.parameters.task
 						: originalMessage;
+
+				// If queue is enabled and pool is busy, queue the task
+				if (this.taskQueue && this._executing) {
+					const handle = this.taskQueue.enqueue(taskText);
+					// Prevent unhandled rejection if the task is later cancelled
+					// (e.g. by pool.destroy() or send("cancel")). The caller only
+					// gets the string message — they never see the handle.
+					handle.completion.catch(() => {});
+					return (
+						`Task queued (ID: ${handle.id}, position: ${handle.position}). ` +
+						`It will execute when a slot is available.`
+					);
+				}
+
 				return this.execute(taskText);
 			}
 
@@ -3469,6 +3659,46 @@ export class AgentPool extends EventEmitter {
 
 			case UserIntent.STATUS_QUERY: {
 				const state = this.getState();
+
+				// Queue status info
+				const queueLines: string[] = [];
+				if (state.queue) {
+					queueLines.push(
+						`**Queue**: ${state.queue.pendingCount} pending, ${state.queue.executingCount} executing, ${state.queue.processedCount} processed`,
+					);
+					queueLines.push("");
+
+					if (state.queue.executingTasks.length > 0) {
+						queueLines.push("**Executing Tasks**:");
+						for (const t of state.queue.executingTasks) {
+							queueLines.push(
+								`- 🔄 ${t.task.slice(0, 80)} (started: ${t.startedAt})`,
+							);
+						}
+						queueLines.push("");
+					}
+
+					if (state.queue.pendingTasks.length > 0) {
+						queueLines.push("**Pending Tasks**:");
+						for (const t of state.queue.pendingTasks) {
+							queueLines.push(
+								`- ⏳ ${t.task.slice(0, 80)} (priority: ${t.priority})`,
+							);
+						}
+						queueLines.push("");
+					}
+				}
+
+				if (
+					!state.executing &&
+					(!state.queue || state.queue.executingCount === 0)
+				) {
+					if (queueLines.length > 0) {
+						return `${queueLines.join("\n")}\nThe pool is idle. No task is currently being executed.`;
+					}
+					return "The pool is idle. No task is currently being executed.";
+				}
+
 				if (!state.executing) {
 					return "The pool is idle. No task is currently being executed.";
 				}
@@ -3589,6 +3819,27 @@ export class AgentPool extends EventEmitter {
 			}
 
 			case UserIntent.CANCEL: {
+				if (this.taskQueue) {
+					// If a specific task ID is mentioned, cancel it
+					const targetTaskId =
+						typeof detected.parameters.taskId === "string"
+							? detected.parameters.taskId
+							: undefined;
+
+					if (targetTaskId) {
+						const cancelled = await this.taskQueue.cancelTask(targetTaskId);
+						return cancelled
+							? `Task ${targetTaskId} cancelled.`
+							: `Task ${targetTaskId} not found or already completed.`;
+					}
+
+					// Cancel all pending + executing (but keep queue open for new tasks)
+					const cancelledCount = await this.taskQueue.cancelAll();
+					await this.destroyManagedAgents();
+					return `All queued and executing tasks cancelled (${cancelledCount} task(s)).`;
+				}
+
+				// Legacy behavior
 				if (!this._executing) {
 					return "No task is currently executing.";
 				}

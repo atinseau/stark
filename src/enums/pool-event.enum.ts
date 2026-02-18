@@ -148,4 +148,33 @@ export enum PoolEvent {
 	 * the execution immediately).
 	 */
 	BUDGET_EXCEEDED = "pool:budget-exceeded",
+
+	/**
+	 * A task has been added to the file d'attente.
+	 * Emitted immediately when `enqueue()` is called.
+	 */
+	TASK_QUEUED = "pool:task-queued",
+
+	/**
+	 * A pending task has started execution.
+	 * Emitted when a concurrency slot frees up and the task
+	 * transitions from "queued" to "executing".
+	 */
+	TASK_DEQUEUED = "pool:task-dequeued",
+
+	/**
+	 * All tasks in the queue have been processed.
+	 * The queue is empty and no execution is in progress.
+	 */
+	QUEUE_DRAINED = "pool:queue-drained",
+
+	/**
+	 * A queued task has been cancelled.
+	 */
+	TASK_CANCELLED = "pool:task-cancelled",
+
+	/**
+	 * A queued task has expired (exceeded `queueTimeoutMs`).
+	 */
+	TASK_EXPIRED = "pool:task-expired",
 }
