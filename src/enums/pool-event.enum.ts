@@ -110,4 +110,14 @@ export enum PoolEvent {
 	 * with coherence score, detected issues, and directives.
 	 */
 	ORCHESTRATOR_ASSESSMENT = "pool:orchestrator-assessment",
+
+	/**
+	 * Post-execution reflection has completed.
+	 *
+	 * Emitted after each multi-agent execution when the reflection
+	 * engine has analyzed the execution and extracted insights.
+	 * Contains the full {@link ExecutionReflection} with effectiveness
+	 * scores and extracted insights.
+	 */
+	REFLECTION_COMPLETE = "pool:reflection-complete",
 }

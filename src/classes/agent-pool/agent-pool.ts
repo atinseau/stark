@@ -39,6 +39,7 @@ import type {
 	ContextEvent,
 	CoordinationStats,
 	DetectedIntent,
+	ExecutionReflection,
 	IntentAnalysis,
 	NotificationPreference,
 	PoolEventMap,
@@ -81,6 +82,7 @@ import { InformationBroker } from "./information-broker.ts";
 import { NotificationEngine } from "./notification-engine.ts";
 import { OrchestratorEngine } from "./orchestrator-engine.ts";
 import { ProjectScanner } from "./project-scanner.ts";
+import { ReflectionEngine } from "./reflection-engine.ts";
 import { TaskPlanner } from "./task-planner.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -259,6 +261,9 @@ export class AgentPool extends EventEmitter {
 
 	/** Meta-reflection orchestrator engine. */
 	private readonly orchestratorEngine: OrchestratorEngine;
+
+	/** Post-execution reflection engine. */
+	private readonly reflectionEngine: ReflectionEngine;
 
 	// ── Runtime State ──────────────────────────────────────────────────
 
@@ -454,6 +459,16 @@ export class AgentPool extends EventEmitter {
 			this.logger,
 			config.orchestrator,
 		);
+
+		// Post-execution reflection engine
+		this.reflectionEngine = new ReflectionEngine(
+			this.conversations,
+			this.logger,
+			config.reflection,
+		);
+
+		// Wire the reflection engine into the planner for insight injection
+		this.planner.setReflectionEngine(this.reflectionEngine);
 
 		this.logger.info(
 			{
@@ -694,6 +709,55 @@ export class AgentPool extends EventEmitter {
 				);
 			}
 
+			// ── Phase 4.5: Post-execution Reflection ─────────────────
+			let reflection: ExecutionReflection | undefined;
+			try {
+				const orchestratorAssessments = this.orchestratorEngine
+					.previousAssessment
+					? [this.orchestratorEngine.previousAssessment]
+					: [];
+
+				const checkpointResults = this.checkpointEvaluator?.lastResult
+					? [this.checkpointEvaluator.lastResult]
+					: [];
+
+				const sharingDecisions = this.buildSharingDecisionsForReflection();
+
+				const reflectionResult = await this.reflectionEngine.reflect({
+					task,
+					analysis,
+					results: executionResults,
+					durationMs,
+					coordinationStats: {
+						deltaCount: this._deltaCount,
+						sharingEvaluationCount:
+							this.informationBroker?.evaluationCount ?? 0,
+						sharingApprovedCount: this.informationBroker?.shareCount ?? 0,
+						notificationCount: this.notificationEngine.notificationCount,
+						replanCount: this._replanCount,
+					},
+					orchestratorAssessments,
+					checkpointResults,
+					sharingDecisions,
+				});
+
+				if (reflectionResult) {
+					reflection = reflectionResult;
+
+					this.emitPoolEvent(PoolEvent.REFLECTION_COMPLETE, {
+						reflection: reflectionResult,
+					});
+
+					// Enrich the PlannerMemory with reflection insights
+					this.enrichPlannerMemoryWithReflection(reflectionResult);
+				}
+			} catch (error) {
+				this.logger.warn(
+					{ error: toErrorMessage(error) },
+					"Post-execution reflection failed (non-critical)",
+				);
+			}
+
 			// Log decision journal analytics before cleanup
 			if (this.informationBroker) {
 				const sharingJournal = this.informationBroker.journal;
@@ -724,6 +788,7 @@ export class AgentPool extends EventEmitter {
 				agents: executionResults,
 				summary,
 				durationMs,
+				reflection,
 			};
 
 			this.emitPoolEvent(PoolEvent.EXECUTION_COMPLETE, {
@@ -779,6 +844,9 @@ export class AgentPool extends EventEmitter {
 			this._retryCount = 0;
 			this._timeoutCount = 0;
 			this._replanCount = 0;
+
+			// Clear detailed reflections but KEEP insights for future executions
+			this.reflectionEngine.clearReflections();
 
 			// Clear notification journal between executions
 			// (broker journal is cleaned naturally since broker is recreated)
@@ -949,6 +1017,10 @@ export class AgentPool extends EventEmitter {
 			activeDirectiveCount: this.orchestratorEngine.activeDirectiveCount,
 			coherenceScore:
 				this.orchestratorEngine.previousAssessment?.coherenceScore ?? null,
+			reflectionCount: this.reflectionEngine.reflectionCount,
+			insightCount: this.reflectionEngine.insightCount,
+			lastEffectivenessScore:
+				this.reflectionEngine.lastReflection?.effectivenessScore ?? null,
 		};
 	}
 
@@ -985,6 +1057,9 @@ export class AgentPool extends EventEmitter {
 
 		// Clear planner memory — memories do not survive pool destruction
 		this.planner.clearMemory();
+
+		// Clear all reflection insights and reflections
+		this.reflectionEngine.clearAll();
 
 		await this.destroyManagedAgents();
 
@@ -2795,6 +2870,73 @@ export class AgentPool extends EventEmitter {
 	private buildSharingSummaries(): CoordinationStats["sharingSummaries"] {
 		const MAX_SHARING_SUMMARIES = 10;
 		return this._sharingSummaries.slice(-MAX_SHARING_SUMMARIES);
+	}
+
+	// ── Private: Reflection Helpers ────────────────────────────────────
+
+	/**
+	 * Collects notable sharing decisions for the reflection prompt.
+	 *
+	 * Reads from the information broker's decision journal (évolution 14)
+	 * and formats them for the reflection engine.
+	 */
+	private buildSharingDecisionsForReflection(): Array<{
+		decision: string;
+		source: string;
+		target: string;
+		reasoning: string;
+	}> {
+		const journal = this.informationBroker?.journal;
+		if (!journal) return [];
+
+		const entries = journal.getAllEntries().slice(-10);
+		return entries.map((entry) => ({
+			decision: entry.approved ? "SHARED" : "DENIED",
+			source: entry.sourceAgentName,
+			target: entry.targetName,
+			reasoning: entry.reasoningSummary,
+		}));
+	}
+
+	/**
+	 * Enriches the most recent PlannerMemory with reflection insights.
+	 *
+	 * The PlannerMemory (évolution 13) stores factual data about each
+	 * execution. This method appends the reflection's analytical insights
+	 * to the memory's `lessons` field, making them available to the
+	 * planner for future task analysis.
+	 *
+	 * @param reflection - The completed execution reflection.
+	 */
+	private enrichPlannerMemoryWithReflection(
+		reflection: ExecutionReflection,
+	): void {
+		// Build lesson strings from insights
+		const insightLessons = reflection.insights
+			.filter((i) => i.confidence >= 0.6)
+			.map((i) => {
+				const polarity =
+					i.polarity === "positive"
+						? "✅"
+						: i.polarity === "negative"
+							? "⚠️"
+							: "ℹ️";
+				return `${polarity} [${i.category}] ${i.insight} (when: ${i.applicableWhen})`;
+			});
+
+		if (insightLessons.length === 0) return;
+
+		// Append the decomposition/sharing assessments as a summary lesson
+		const assessmentLesson =
+			`Reflection: effectiveness=${reflection.effectivenessScore}, ` +
+			`decomposition=${reflection.decompositionAssessment}, ` +
+			`sharing=${reflection.sharingAssessment}`;
+
+		// Append to the planner's most recent memory entry
+		this.planner.appendLessonsToLastMemory([
+			assessmentLesson,
+			...insightLessons,
+		]);
 	}
 
 	// ── Private: Intent Analysis ───────────────────────────────────────

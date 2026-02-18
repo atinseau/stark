@@ -1084,6 +1084,171 @@ export interface OrchestratorConfig {
 	readonly defaultDirectiveTtl?: number;
 }
 
+// ── Reflection Types ───────────────────────────────────────────────────────
+
+/**
+ * An actionable insight extracted from post-execution reflection.
+ *
+ * Insights are the primary output of the reflection cycle. They
+ * represent patterns, lessons, and recommendations that can be
+ * injected into future planning and coordination decisions.
+ */
+export interface ExecutionInsight {
+	/** Unique identifier for this insight. */
+	readonly id: string;
+
+	/** Category of the insight. */
+	readonly category:
+		| "decomposition"
+		| "sharing"
+		| "coordination"
+		| "performance"
+		| "tooling";
+
+	/** Confidence that this insight is valid and useful (0.0–1.0). */
+	readonly confidence: number;
+
+	/**
+	 * The insight itself — a concise, actionable statement.
+	 *
+	 * Examples:
+	 * - "Splitting frontend and backend into separate agents works well when there's a clear API contract"
+	 * - "The test-writer agent needs the full API contract (routes + schemas), not just file paths"
+	 * - "Tasks involving a single language and framework should use a single agent"
+	 */
+	readonly insight: string;
+
+	/**
+	 * Under what conditions this insight applies.
+	 *
+	 * Examples:
+	 * - "When the task involves building an API and writing tests for it"
+	 * - "When multiple agents share filesystem access"
+	 */
+	readonly applicableWhen: string;
+
+	/**
+	 * Polarity of the insight.
+	 * - `positive`: Something that worked well and should be replicated
+	 * - `negative`: Something that went wrong and should be avoided
+	 * - `neutral`: An observation without clear positive/negative valence
+	 */
+	readonly polarity: "positive" | "negative" | "neutral";
+
+	/** ISO-8601 timestamp of creation. */
+	readonly timestamp: string;
+}
+
+/**
+ * The full output of the post-execution reflection cycle.
+ *
+ * Contains the LLM's analysis of the execution quality along with
+ * extracted insights that will influence future executions.
+ */
+export interface ExecutionReflection {
+	/** The task that was executed. */
+	readonly task: string;
+
+	/** The strategy that was used. */
+	readonly strategy: ExecutionStrategy;
+
+	/**
+	 * Overall effectiveness rating of the execution (0.0–1.0).
+	 * - 0.0 = Complete failure, wrong approach
+	 * - 0.5 = Partially successful, significant issues
+	 * - 1.0 = Excellent execution, optimal coordination
+	 */
+	readonly effectivenessScore: number;
+
+	/**
+	 * Free-text analysis of the execution quality.
+	 * Covers what worked, what didn't, and why.
+	 */
+	readonly analysis: string;
+
+	/**
+	 * Assessment of whether the decomposition was appropriate.
+	 * - `optimal`: The strategy was the right choice
+	 * - `over-decomposed`: Should have used fewer agents
+	 * - `under-decomposed`: Should have used more agents
+	 * - `wrong-boundaries`: The subtask boundaries were wrong
+	 */
+	readonly decompositionAssessment:
+		| "optimal"
+		| "over-decomposed"
+		| "under-decomposed"
+		| "wrong-boundaries";
+
+	/**
+	 * Assessment of information sharing quality.
+	 * - `optimal`: Right amount and quality of sharing
+	 * - `over-shared`: Too much information flow, agents were distracted
+	 * - `under-shared`: Not enough information flow, agents were siloed
+	 * - `wrong-content`: Information was shared but not the right content
+	 */
+	readonly sharingAssessment:
+		| "optimal"
+		| "over-shared"
+		| "under-shared"
+		| "wrong-content";
+
+	/** Extracted insights from the reflection. */
+	readonly insights: ExecutionInsight[];
+
+	/** ISO-8601 timestamp of the reflection. */
+	readonly timestamp: string;
+
+	/** Duration of the original execution in milliseconds. */
+	readonly executionDurationMs: number;
+}
+
+/**
+ * Configuration for the post-execution reflection engine.
+ */
+export interface ReflectionConfig {
+	/**
+	 * Enable or disable post-execution reflection.
+	 * Default: true for multi-agent executions, false for single-agent.
+	 */
+	readonly enabled?: boolean;
+
+	/**
+	 * Maximum number of insights to retain across executions.
+	 * Oldest insights are evicted when this limit is reached.
+	 * Default: 30.
+	 */
+	readonly maxInsights?: number;
+
+	/**
+	 * Minimum effectiveness score of an execution for its insights
+	 * to be considered "validated positive patterns".
+	 * Insights from executions below this threshold are still stored
+	 * but marked with lower confidence.
+	 * Default: 0.7.
+	 */
+	readonly positivePatternThreshold?: number;
+
+	/**
+	 * Maximum number of insights to include in planner prompts.
+	 * Controls the token budget for insight injection.
+	 * Default: 8.
+	 */
+	readonly maxInsightsInPrompt?: number;
+
+	/**
+	 * Minimum confidence for an insight to be included in prompts.
+	 * Insights below this threshold are stored but not injected.
+	 * Default: 0.6.
+	 */
+	readonly minInsightConfidence?: number;
+
+	/**
+	 * Whether to reflect on single-agent executions.
+	 * Usually not worth the token cost. Default: false.
+	 */
+	readonly reflectOnSingleAgent?: boolean;
+}
+
 // ── Planner Memory ─────────────────────────────────────────────────────────
 
 /**
@@ -1370,6 +1535,12 @@ export interface AgentPoolConfig {
 	 * Disabled for single-agent executions (unnecessary).
 	 */
 	readonly orchestrator?: OrchestratorConfig;
+
+	/**
+	 * Configuration for post-execution reflection.
+	 * Enabled by default for multi-agent executions.
+	 */
+	readonly reflection?: ReflectionConfig;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────
@@ -1433,6 +1604,9 @@ export interface AgentPoolResult {
 
 	/** Total execution time in milliseconds. */
 	readonly durationMs: number;
+
+	/** Post-execution reflection with effectiveness analysis and insights, if performed. */
+	readonly reflection?: ExecutionReflection;
 }
 
 /**
@@ -1554,6 +1728,15 @@ export interface AgentPoolState {
 
 	/** Most recent coherence score from the orchestrator, or null. */
 	readonly coherenceScore: number | null;
+
+	/** Number of post-execution reflections performed. */
+	readonly reflectionCount: number;
+
+	/** Number of stored execution insights. */
+	readonly insightCount: number;
+
+	/** Most recent effectiveness score, or null. */
+	readonly lastEffectivenessScore: number | null;
 }
 
 // ── Pool Event Map ─────────────────────────────────────────────────────────
@@ -1658,6 +1841,11 @@ export interface OrchestratorAssessmentEvent extends BasePoolEvent {
 	readonly assessment: OrchestratorAssessment;
 }
 
+export interface ReflectionCompleteEvent extends BasePoolEvent {
+	readonly event: PoolEvent.REFLECTION_COMPLETE;
+	readonly reflection: ExecutionReflection;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -1727,4 +1915,5 @@ export interface PoolEventMap {
 	[PoolEvent.REPLAN_COMPLETE]: ReplanCompleteEvent;
 	[PoolEvent.CHECKPOINT_EVALUATED]: CheckpointEvaluatedEvent;
 	[PoolEvent.ORCHESTRATOR_ASSESSMENT]: OrchestratorAssessmentEvent;
+	[PoolEvent.REFLECTION_COMPLETE]: ReflectionCompleteEvent;
 }

@@ -20,6 +20,7 @@ import type {
 import { toErrorMessage } from "../../utils/errors.ts";
 import { isoNow } from "../../utils/formatting.ts";
 import type { ConversationManager } from "./conversation-manager.ts";
+import type { ReflectionEngine } from "./reflection-engine.ts";
 
 // ── Validators ─────────────────────────────────────────────────────────────
 
@@ -405,6 +406,12 @@ export class TaskPlanner {
 	 */
 	private readonly memories: PlannerMemory[] = [];
 
+	/**
+	 * Optional reference to the reflection engine for insight injection.
+	 * Set via `setReflectionEngine()` after construction.
+	 */
+	private reflectionEngine: ReflectionEngine | null = null;
+
 	constructor(
 		private readonly conversations: ConversationManager,
 		private readonly logger: pino.Logger,
@@ -448,12 +455,17 @@ export class TaskPlanner {
 		const memoryContext = this.buildMemoryContext();
 
 		// Build the analysis prompt from the Handlebars template
+		// Get execution insights from the reflection engine (if available)
+		const executionInsights =
+			this.reflectionEngine?.getInsightsPromptSection() ?? null;
+
 		const prompt = taskAnalysisPrompt({
 			task: sanitizedTask,
 			contextHints: contextHints ?? null,
 			constraints: constraints ?? null,
 			projectContext: projectContext ?? null,
 			previousExecutions: memoryContext,
+			executionInsights,
 		});
 
 		this.logger.info(
@@ -908,5 +920,51 @@ export class TaskPlanner {
 	 */
 	getMemories(): readonly PlannerMemory[] {
 		return this.memories;
+	}
+
+	// ── Reflection Integration ─────────────────────────────────────────
+
+	/**
+	 * Sets the reflection engine reference for insight injection.
+	 *
+	 * Called by the AgentPool after constructing both the planner and
+	 * the reflection engine. The planner uses this to inject insights
+	 * into future task analysis prompts.
+	 *
+	 * @param engine - The reflection engine instance.
+	 */
+	setReflectionEngine(engine: ReflectionEngine): void {
+		this.reflectionEngine = engine;
+	}
+
+	/**
+	 * Appends additional lessons to the most recent PlannerMemory entry.
+	 *
+	 * Called by the reflection engine to enrich factual memories with
+	 * analytical insights after execution.
+	 *
+	 * @param lessons - Additional lesson strings to append.
+	 */
+	appendLessonsToLastMemory(lessons: string[]): void {
+		if (this.memories.length === 0) return;
+		if (lessons.length === 0) return;
+
+		const lastMemory = this.memories[this.memories.length - 1];
+		if (!lastMemory) return;
+
+		// Append lessons, keeping the total reasonable
+		const combined = `${lastMemory.lessons}\n${lessons.join("\n")}`;
+
+		// Replace the entry (PlannerMemory fields are readonly,
+		// so we replace the entry in the array)
+		this.memories[this.memories.length - 1] = {
+			...lastMemory,
+			lessons: combined.slice(0, 2000), // Cap total lesson length
+		};
+
+		this.logger.debug(
+			{ appendedLessonCount: lessons.length },
+			`Appended ${lessons.length} reflection insight(s) to planner memory`,
+		);
 	}
 }

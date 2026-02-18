@@ -22,6 +22,10 @@ export {
 	replanPrompt,
 	taskAnalysisPrompt,
 } from "./planning.ts";
+export {
+	reflectionPrompt,
+	reflectionSystemPrompt,
+} from "./reflection.ts";
 export { sharingDecisionPrompt } from "./sharing-decision.ts";
 export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
@@ -48,6 +52,7 @@ import {
 	replanPrompt,
 	taskAnalysisPrompt,
 } from "./planning.ts";
+import { reflectionPrompt, reflectionSystemPrompt } from "./reflection.ts";
 import { sharingDecisionPrompt } from "./sharing-decision.ts";
 import { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
@@ -93,4 +98,8 @@ export const templates = {
 	// Execution summary
 	summarySystem: summarySystemPrompt,
 	summary: summaryPrompt,
+
+	// Reflection (post-execution analysis)
+	reflectionSystem: reflectionSystemPrompt,
+	reflection: reflectionPrompt,
 } as const;

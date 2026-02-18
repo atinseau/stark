@@ -232,6 +232,36 @@ export async function main(): Promise<void> {
 		}
 	});
 
+	// Post-execution reflection insights
+	pool.on(PoolEvent.REFLECTION_COMPLETE, (e) => {
+		const { reflection } = e;
+		const scoreColor =
+			reflection.effectivenessScore >= 0.8
+				? ansi.green
+				: reflection.effectivenessScore >= 0.5
+					? ansi.yellow
+					: ansi.red;
+		info(
+			"🔍",
+			`${scoreColor}Reflection: effectiveness=${reflection.effectivenessScore}${ansi.reset}, ` +
+				`decomposition=${reflection.decompositionAssessment}, ` +
+				`sharing=${reflection.sharingAssessment}`,
+		);
+		info("💡", `${reflection.insights.length} insight(s) extracted`);
+		for (const insight of reflection.insights) {
+			const icon =
+				insight.polarity === "positive"
+					? "✅"
+					: insight.polarity === "negative"
+						? "⚠️"
+						: "ℹ️";
+			info(
+				"  ",
+				`${icon} [${insight.category}] ${ansi.dim}${truncate(insight.insight, 120)}${ansi.reset}`,
+			);
+		}
+	});
+
 	// Execution lifecycle
 	pool.on(PoolEvent.EXECUTION_COMPLETE, (e) => {
 		info(

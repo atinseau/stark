@@ -222,6 +222,11 @@ Working directory: {{projectContext.cwd}}
 {{/if}}
 {{/if}}
 
+{{#if executionInsights}}
+
+{{executionInsights}}
+{{/if}}
+
 Only use "multi" if decomposition provides genuine, meaningful benefit. Single agent is often better. Respond with the JSON analysis object.`;
 
 export const taskAnalysisPrompt = Handlebars.compile(TASK_ANALYSIS_SOURCE, {
