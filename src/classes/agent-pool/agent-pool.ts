@@ -35,6 +35,7 @@ import type {
 	AgentPoolResult,
 	AgentPoolState,
 	BasePoolEvent,
+	ConflictRecord,
 	ContextDelta,
 	ContextEvent,
 	CoordinationStats,
@@ -76,6 +77,7 @@ import {
 	type ApprovalResolution,
 } from "./approval-manager.ts";
 import { CheckpointEvaluator } from "./checkpoint-evaluator.ts";
+import { ConflictDetector } from "./conflict-detector.ts";
 import { ContextTracker } from "./context-tracker.ts";
 import { ConversationManager } from "./conversation-manager.ts";
 import { InformationBroker } from "./information-broker.ts";
@@ -264,6 +266,9 @@ export class AgentPool extends EventEmitter {
 
 	/** Post-execution reflection engine. */
 	private readonly reflectionEngine: ReflectionEngine;
+
+	/** Inter-agent conflict detection engine (created per-execution, multi-agent only). */
+	private conflictDetector: ConflictDetector | null = null;
 
 	// ── Runtime State ──────────────────────────────────────────────────
 
@@ -650,6 +655,17 @@ export class AgentPool extends EventEmitter {
 					this.config.checkpoints,
 				);
 			}
+
+			// Create the conflict detector for multi-agent executions
+			if (analysis.strategy !== ExecutionStrategy.SINGLE) {
+				this.conflictDetector = new ConflictDetector(
+					this.conversations,
+					this.contextTracker,
+					this.logger,
+					this.config.conflictDetection,
+				);
+			}
+
 			this._executionStartTime = Date.now();
 
 			this.logger.info(
@@ -834,6 +850,7 @@ export class AgentPool extends EventEmitter {
 			this.informationBroker = null;
 			this.checkpointEvaluator?.reset();
 			this.checkpointEvaluator = null;
+			this.conflictDetector = null;
 			this.orchestratorEngine.reset();
 			this._executionStartTime = 0;
 			this.subtaskToAgent.clear();
@@ -1002,6 +1019,9 @@ export class AgentPool extends EventEmitter {
 
 		return {
 			executing: this._executing,
+			conflictCount: this.conflictDetector?.conflictCount ?? 0,
+			unresolvedConflictCount:
+				this.conflictDetector?.unresolvedHighSeverityCount ?? 0,
 			currentTask: this._currentTask,
 			strategy: this._currentStrategy,
 			activeAgentCount: this.managedAgents.size,
@@ -2520,6 +2540,36 @@ export class AgentPool extends EventEmitter {
 				// Fire-and-forget: don't block delta processing
 				void this.evaluateOrchestrator();
 			}
+
+			// ── Conflict Detection ─────────────────────────────────────
+			if (this.conflictDetector?.isEnabled) {
+				try {
+					const conflicts = await this.conflictDetector.evaluate(
+						delta,
+						this.informationBroker,
+					);
+
+					for (const conflict of conflicts) {
+						this.emitPoolEvent(PoolEvent.CONFLICT_DETECTED, { conflict });
+
+						// Alert affected agents if severity is above threshold
+						if (
+							conflict.severity >=
+							(this.config.conflictDetection?.minAlertSeverity ?? 0.5)
+						) {
+							this.alertAffectedAgents(conflict);
+						}
+					}
+				} catch (conflictError) {
+					this.logger.warn(
+						{
+							error: toErrorMessage(conflictError),
+							agentId: delta.agentId,
+						},
+						"Conflict detection failed (non-critical)",
+					);
+				}
+			}
 		} catch (error) {
 			this.logger.warn(
 				{
@@ -2584,6 +2634,64 @@ export class AgentPool extends EventEmitter {
 				"Orchestrator evaluation failed (non-critical)",
 			);
 		}
+	}
+
+	// ── Private: Conflict Alert ────────────────────────────────────────
+
+	/**
+	 * Sends structured conflict alerts to all affected agents.
+	 *
+	 * Uses the StructuredContextInjection system (évolution 08) with
+	 * CRITICAL priority and coordination_alert category.
+	 *
+	 * @param conflict - The detected conflict to alert about.
+	 */
+	private alertAffectedAgents(conflict: ConflictRecord): void {
+		for (const targetAgentId of conflict.affectedAgentIds) {
+			const targetEntry = this.managedAgents.get(targetAgentId);
+			if (!targetEntry || targetEntry.agent.status === AgentStatus.DESTROYED)
+				continue;
+
+			const alertContent =
+				`⚠️ CONFLICT ALERT: ${conflict.description}\n\n` +
+				`Recommendation: ${conflict.recommendation}` +
+				(conflict.staleInformation
+					? `\n\nPreviously shared info that may be stale: "${conflict.staleInformation}"`
+					: "");
+
+			try {
+				targetEntry.agent.injectContext({
+					content: alertContent,
+					priority: ContextInjectionPriority.CRITICAL,
+					category: ContextInjectionCategory.COORDINATION_ALERT,
+					source: `conflict-detector (from ${conflict.sourceAgentName})`,
+					dependencyType: null,
+					timestamp: conflict.timestamp,
+				});
+
+				this.logger.info(
+					{
+						conflictId: conflict.id,
+						conflictType: conflict.type,
+						targetAgentId,
+						targetAgentName: targetEntry.agent.name,
+						severity: conflict.severity,
+					},
+					`Conflict alert sent to ${targetEntry.agent.name}: ${conflict.description.slice(0, 100)}`,
+				);
+			} catch (injectError) {
+				this.logger.warn(
+					{
+						targetAgentId,
+						error: toErrorMessage(injectError),
+					},
+					"Failed to inject conflict alert",
+				);
+			}
+		}
+
+		// Mark as resolved (alert sent)
+		this.conflictDetector?.markResolved(conflict.id);
 	}
 
 	// ── Private: Checkpoint Execution ──────────────────────────────────

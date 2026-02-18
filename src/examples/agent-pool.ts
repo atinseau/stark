@@ -262,6 +262,29 @@ export async function main(): Promise<void> {
 		}
 	});
 
+	// Conflict detection alerts
+	pool.on(PoolEvent.CONFLICT_DETECTED, (e) => {
+		const { conflict } = e;
+		const severityColor =
+			conflict.severity >= 0.7
+				? ansi.red
+				: conflict.severity >= 0.4
+					? ansi.yellow
+					: ansi.dim;
+		info(
+			"⚡",
+			`${severityColor}Conflict [${conflict.type}]: ${truncate(conflict.description, 120)}${ansi.reset}`,
+		);
+		info(
+			"  ",
+			`${ansi.dim}Severity: ${conflict.severity}, Affected: ${conflict.affectedAgentIds.join(", ")}${ansi.reset}`,
+		);
+		info(
+			"  ",
+			`${ansi.dim}Recommendation: ${truncate(conflict.recommendation, 100)}${ansi.reset}`,
+		);
+	});
+
 	// Execution lifecycle
 	pool.on(PoolEvent.EXECUTION_COMPLETE, (e) => {
 		info(

@@ -3,6 +3,7 @@ export {
 	checkpointPrompt,
 	checkpointSystemPrompt,
 } from "./checkpoint.ts";
+export { conflictAnalysisPrompt } from "./conflict-analysis.ts";
 export {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
@@ -33,6 +34,7 @@ export { summaryPrompt, summarySystemPrompt } from "./summary.ts";
 
 import { batchedSharingDecisionPrompt } from "./batched-sharing-decision.ts";
 import { checkpointPrompt, checkpointSystemPrompt } from "./checkpoint.ts";
+import { conflictAnalysisPrompt } from "./conflict-analysis.ts";
 import {
 	contextAnalysisPrompt,
 	contextAnalysisSystemPrompt,
@@ -75,6 +77,9 @@ export const templates = {
 
 	// Sharing analysis (cross-agent)
 	sharingAnalysisSystem: sharingAnalysisSystemPrompt,
+
+	// Conflict analysis
+	conflictAnalysis: conflictAnalysisPrompt,
 
 	// Information sharing
 	sharingDecision: sharingDecisionPrompt,

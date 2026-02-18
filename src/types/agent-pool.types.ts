@@ -1369,6 +1369,104 @@ export interface DecisionJournalConfig {
 	readonly maxReasoningLength?: number;
 }
 
+// ── Conflict Detection Types ───────────────────────────────────────────────
+
+/**
+ * Categories of conflicts that can be detected between agents.
+ */
+export type ConflictType =
+	| "file_overlap" // Two agents wrote to the same file
+	| "stale_share" // Previously shared info was invalidated by a subsequent change
+	| "semantic_conflict" // LLM-detected semantic contradiction between agent outputs
+	| "dependency_violation"; // An agent's output contradicts its dependency contract
+
+/**
+ * A detected conflict between two agents or between an agent's
+ * current output and previously shared information.
+ */
+export interface ConflictRecord {
+	/** Unique identifier for this conflict. */
+	readonly id: string;
+
+	/** The type of conflict detected. */
+	readonly type: ConflictType;
+
+	/** Severity assessment (0.0–1.0). */
+	readonly severity: number;
+
+	/** Human-readable description of the conflict. */
+	readonly description: string;
+
+	/**
+	 * The agent whose activity revealed the conflict.
+	 * This is the agent that wrote/produced the conflicting output.
+	 */
+	readonly sourceAgentId: string;
+	readonly sourceAgentName: string;
+
+	/**
+	 * The agent(s) affected by the conflict.
+	 * These agents may need to be notified or have their work corrected.
+	 */
+	readonly affectedAgentIds: string[];
+
+	/**
+	 * The file path involved, if the conflict is file-related.
+	 */
+	readonly filePath?: string;
+
+	/**
+	 * The stale information that was previously shared, if this
+	 * is a `stale_share` conflict.
+	 */
+	readonly staleInformation?: string;
+
+	/**
+	 * LLM-generated resolution recommendation.
+	 */
+	readonly recommendation: string;
+
+	/** ISO-8601 timestamp of detection. */
+	readonly timestamp: string;
+
+	/** Whether this conflict has been addressed (alert sent to affected agents). */
+	resolved: boolean;
+}
+
+/**
+ * Configuration for the conflict detection engine.
+ */
+export interface ConflictDetectorConfig {
+	/**
+	 * Enable or disable conflict detection.
+	 * Default: true for multi-agent executions.
+	 */
+	readonly enabled?: boolean;
+
+	/**
+	 * Whether to use LLM-driven semantic conflict analysis.
+	 * When false, only structural conflicts (file overlaps, stale shares)
+	 * are detected. Semantic analysis costs more tokens but catches
+	 * subtler conflicts.
+	 * Default: true.
+	 */
+	readonly enableSemanticAnalysis?: boolean;
+
+	/**
+	 * Minimum severity for a conflict to trigger an alert to affected agents.
+	 * Conflicts below this threshold are logged but not acted upon.
+	 * Default: 0.5.
+	 */
+	readonly minAlertSeverity?: number;
+
+	/**
+	 * Maximum number of conflicts to retain per execution.
+	 * Prevents unbounded memory growth in pathological cases.
+	 * Default: 50.
+	 */
+	readonly maxConflicts?: number;
+}
+
 // ── Agent Pool Configuration ───────────────────────────────────────────────
 
 /**
@@ -1541,6 +1639,12 @@ export interface AgentPoolConfig {
 	 * Enabled by default for multi-agent executions.
 	 */
 	readonly reflection?: ReflectionConfig;
+
+	/**
+	 * Configuration for inter-agent conflict detection.
+	 * Enabled by default for multi-agent executions.
+	 */
+	readonly conflictDetection?: ConflictDetectorConfig;
 }
 
 // ── Agent Abstraction ──────────────────────────────────────────────────────
@@ -1664,6 +1768,12 @@ export interface AgentExecutionResult {
 export interface AgentPoolState {
 	/** Whether the pool is currently executing a task. */
 	readonly executing: boolean;
+
+	/** Number of conflicts detected in the current execution. */
+	readonly conflictCount: number;
+
+	/** Number of unresolved high-severity conflicts. */
+	readonly unresolvedConflictCount: number;
 
 	/** The current task description, if any. */
 	readonly currentTask: string | null;
@@ -1846,6 +1956,11 @@ export interface ReflectionCompleteEvent extends BasePoolEvent {
 	readonly reflection: ExecutionReflection;
 }
 
+export interface ConflictDetectedEvent extends BasePoolEvent {
+	readonly event: PoolEvent.CONFLICT_DETECTED;
+	readonly conflict: ConflictRecord;
+}
+
 export interface AgentTimeoutEvent extends BasePoolEvent {
 	readonly event: PoolEvent.AGENT_TIMEOUT;
 	readonly agentId: string;
@@ -1916,4 +2031,5 @@ export interface PoolEventMap {
 	[PoolEvent.CHECKPOINT_EVALUATED]: CheckpointEvaluatedEvent;
 	[PoolEvent.ORCHESTRATOR_ASSESSMENT]: OrchestratorAssessmentEvent;
 	[PoolEvent.REFLECTION_COMPLETE]: ReflectionCompleteEvent;
+	[PoolEvent.CONFLICT_DETECTED]: ConflictDetectedEvent;
 }

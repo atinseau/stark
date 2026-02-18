@@ -34,6 +34,12 @@ describe("Pool Enums", () => {
 		expect(PoolEvent.ORCHESTRATOR_ASSESSMENT as string).toBe(
 			"pool:orchestrator-assessment",
 		);
+		expect(PoolEvent.REFLECTION_COMPLETE as string).toBe(
+			"pool:reflection-complete",
+		);
+		expect(PoolEvent.CONFLICT_DETECTED as string).toBe(
+			"pool:conflict-detected",
+		);
 	});
 
 	it("ConversationRole has all expected roles", () => {
@@ -71,6 +77,7 @@ describe("Pool Enums", () => {
 		expect(DeltaType.PLAN_UPDATE as string).toBe("plan_update");
 		expect(DeltaType.FILE_WRITTEN as string).toBe("file_written");
 		expect(DeltaType.FILE_READ as string).toBe("file_read");
+		expect(DeltaType.CONFLICT_DETECTED as string).toBe("conflict_detected");
 	});
 
 	it("UserIntent has all expected intents", () => {

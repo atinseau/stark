@@ -120,4 +120,12 @@ export enum PoolEvent {
 	 * scores and extracted insights.
 	 */
 	REFLECTION_COMPLETE = "pool:reflection-complete",
+
+	/**
+	 * A conflict was detected between two agents' activities.
+	 *
+	 * Emitted when the conflict detector identifies contradictory
+	 * outputs, overlapping file writes, or stale shared information.
+	 */
+	CONFLICT_DETECTED = "pool:conflict-detected",
 }

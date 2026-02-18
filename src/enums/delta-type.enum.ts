@@ -25,4 +25,7 @@ export enum DeltaType {
 
 	/** A file was read by an agent. */
 	FILE_READ = "file_read",
+
+	/** A conflict was detected between two agents' outputs or activities. */
+	CONFLICT_DETECTED = "conflict_detected",
 }
